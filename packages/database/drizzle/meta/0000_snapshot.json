@@ -1,0 +1,455 @@
+{
+	"version": "6",
+	"dialect": "sqlite",
+	"id": "0bb1340a-f2d3-46ca-9ebf-7b771b2ca643",
+	"prevId": "00000000-0000-0000-0000-000000000000",
+	"tables": {
+		"code_symbols": {
+			"name": "code_symbols",
+			"columns": {
+				"id": {
+					"name": "id",
+					"type": "text",
+					"primaryKey": true,
+					"notNull": true,
+					"autoincrement": false
+				},
+				"name": {
+					"name": "name",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": true,
+					"autoincrement": false
+				},
+				"kind": {
+					"name": "kind",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": true,
+					"autoincrement": false
+				},
+				"file": {
+					"name": "file",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": true,
+					"autoincrement": false
+				},
+				"startLine": {
+					"name": "startLine",
+					"type": "integer",
+					"primaryKey": false,
+					"notNull": true,
+					"autoincrement": false
+				},
+				"endLine": {
+					"name": "endLine",
+					"type": "integer",
+					"primaryKey": false,
+					"notNull": true,
+					"autoincrement": false
+				},
+				"parent": {
+					"name": "parent",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": false,
+					"autoincrement": false
+				},
+				"signature": {
+					"name": "signature",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": false,
+					"autoincrement": false
+				},
+				"fileIndexId": {
+					"name": "fileIndexId",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": false,
+					"autoincrement": false
+				}
+			},
+			"indexes": {
+				"code_symbols_name_idx": {
+					"name": "code_symbols_name_idx",
+					"columns": ["name"],
+					"isUnique": false
+				},
+				"code_symbols_kind_idx": {
+					"name": "code_symbols_kind_idx",
+					"columns": ["kind"],
+					"isUnique": false
+				},
+				"code_symbols_file_idx": {
+					"name": "code_symbols_file_idx",
+					"columns": ["file"],
+					"isUnique": false
+				}
+			},
+			"foreignKeys": {
+				"code_symbols_fileIndexId_file_index_id_fk": {
+					"name": "code_symbols_fileIndexId_file_index_id_fk",
+					"tableFrom": "code_symbols",
+					"tableTo": "file_index",
+					"columnsFrom": ["fileIndexId"],
+					"columnsTo": ["id"],
+					"onDelete": "cascade",
+					"onUpdate": "no action"
+				}
+			},
+			"compositePrimaryKeys": {},
+			"uniqueConstraints": {},
+			"checkConstraints": {}
+		},
+		"embeddings": {
+			"name": "embeddings",
+			"columns": {
+				"id": {
+					"name": "id",
+					"type": "text",
+					"primaryKey": true,
+					"notNull": true,
+					"autoincrement": false
+				},
+				"filePath": {
+					"name": "filePath",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": true,
+					"autoincrement": false
+				},
+				"chunk": {
+					"name": "chunk",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": true,
+					"autoincrement": false
+				},
+				"vector": {
+					"name": "vector",
+					"type": "blob",
+					"primaryKey": false,
+					"notNull": true,
+					"autoincrement": false
+				},
+				"startLine": {
+					"name": "startLine",
+					"type": "integer",
+					"primaryKey": false,
+					"notNull": true,
+					"autoincrement": false
+				},
+				"endLine": {
+					"name": "endLine",
+					"type": "integer",
+					"primaryKey": false,
+					"notNull": true,
+					"autoincrement": false
+				},
+				"model": {
+					"name": "model",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": true,
+					"autoincrement": false,
+					"default": "'text-embedding-3-small'"
+				}
+			},
+			"indexes": {
+				"embeddings_filePath_idx": {
+					"name": "embeddings_filePath_idx",
+					"columns": ["filePath"],
+					"isUnique": false
+				}
+			},
+			"foreignKeys": {},
+			"compositePrimaryKeys": {},
+			"uniqueConstraints": {},
+			"checkConstraints": {}
+		},
+		"file_index": {
+			"name": "file_index",
+			"columns": {
+				"id": {
+					"name": "id",
+					"type": "text",
+					"primaryKey": true,
+					"notNull": true,
+					"autoincrement": false
+				},
+				"path": {
+					"name": "path",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": true,
+					"autoincrement": false
+				},
+				"hash": {
+					"name": "hash",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": true,
+					"autoincrement": false
+				},
+				"language": {
+					"name": "language",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": true,
+					"autoincrement": false,
+					"default": "'unknown'"
+				},
+				"symbolCount": {
+					"name": "symbolCount",
+					"type": "integer",
+					"primaryKey": false,
+					"notNull": true,
+					"autoincrement": false,
+					"default": 0
+				},
+				"lastIndexed": {
+					"name": "lastIndexed",
+					"type": "integer",
+					"primaryKey": false,
+					"notNull": true,
+					"autoincrement": false
+				}
+			},
+			"indexes": {
+				"file_index_path_unique": {
+					"name": "file_index_path_unique",
+					"columns": ["path"],
+					"isUnique": true
+				},
+				"file_index_path_idx": {
+					"name": "file_index_path_idx",
+					"columns": ["path"],
+					"isUnique": false
+				},
+				"file_index_language_idx": {
+					"name": "file_index_language_idx",
+					"columns": ["language"],
+					"isUnique": false
+				}
+			},
+			"foreignKeys": {},
+			"compositePrimaryKeys": {},
+			"uniqueConstraints": {},
+			"checkConstraints": {}
+		},
+		"git_commits": {
+			"name": "git_commits",
+			"columns": {
+				"id": {
+					"name": "id",
+					"type": "text",
+					"primaryKey": true,
+					"notNull": true,
+					"autoincrement": false
+				},
+				"hash": {
+					"name": "hash",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": true,
+					"autoincrement": false
+				},
+				"sessionId": {
+					"name": "sessionId",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": true,
+					"autoincrement": false
+				},
+				"message": {
+					"name": "message",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": true,
+					"autoincrement": false
+				},
+				"files": {
+					"name": "files",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": true,
+					"autoincrement": false,
+					"default": "'[]'"
+				},
+				"createdAt": {
+					"name": "createdAt",
+					"type": "integer",
+					"primaryKey": false,
+					"notNull": true,
+					"autoincrement": false
+				}
+			},
+			"indexes": {
+				"git_commits_sessionId_idx": {
+					"name": "git_commits_sessionId_idx",
+					"columns": ["sessionId"],
+					"isUnique": false
+				},
+				"git_commits_hash_idx": {
+					"name": "git_commits_hash_idx",
+					"columns": ["hash"],
+					"isUnique": false
+				}
+			},
+			"foreignKeys": {},
+			"compositePrimaryKeys": {},
+			"uniqueConstraints": {},
+			"checkConstraints": {}
+		},
+		"sessions": {
+			"name": "sessions",
+			"columns": {
+				"id": {
+					"name": "id",
+					"type": "text",
+					"primaryKey": true,
+					"notNull": true,
+					"autoincrement": false
+				},
+				"userId": {
+					"name": "userId",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": true,
+					"autoincrement": false,
+					"default": "'local'"
+				},
+				"createdAt": {
+					"name": "createdAt",
+					"type": "integer",
+					"primaryKey": false,
+					"notNull": true,
+					"autoincrement": false
+				},
+				"title": {
+					"name": "title",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": true,
+					"autoincrement": false
+				},
+				"updatedAt": {
+					"name": "updatedAt",
+					"type": "integer",
+					"primaryKey": false,
+					"notNull": true,
+					"autoincrement": false
+				},
+				"messages": {
+					"name": "messages",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": true,
+					"autoincrement": false,
+					"default": "'[]'"
+				}
+			},
+			"indexes": {
+				"sessions_userId_idx": {
+					"name": "sessions_userId_idx",
+					"columns": ["userId"],
+					"isUnique": false
+				},
+				"sessions_createdAt_idx": {
+					"name": "sessions_createdAt_idx",
+					"columns": ["createdAt"],
+					"isUnique": false
+				}
+			},
+			"foreignKeys": {},
+			"compositePrimaryKeys": {},
+			"uniqueConstraints": {},
+			"checkConstraints": {}
+		},
+		"tool_cache": {
+			"name": "tool_cache",
+			"columns": {
+				"id": {
+					"name": "id",
+					"type": "text",
+					"primaryKey": true,
+					"notNull": true,
+					"autoincrement": false
+				},
+				"key": {
+					"name": "key",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": true,
+					"autoincrement": false
+				},
+				"toolName": {
+					"name": "toolName",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": true,
+					"autoincrement": false
+				},
+				"result": {
+					"name": "result",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": true,
+					"autoincrement": false
+				},
+				"createdAt": {
+					"name": "createdAt",
+					"type": "integer",
+					"primaryKey": false,
+					"notNull": true,
+					"autoincrement": false
+				},
+				"expiresAt": {
+					"name": "expiresAt",
+					"type": "integer",
+					"primaryKey": false,
+					"notNull": true,
+					"autoincrement": false
+				}
+			},
+			"indexes": {
+				"tool_cache_key_unique": {
+					"name": "tool_cache_key_unique",
+					"columns": ["key"],
+					"isUnique": true
+				},
+				"tool_cache_key_idx": {
+					"name": "tool_cache_key_idx",
+					"columns": ["key"],
+					"isUnique": false
+				},
+				"tool_cache_toolName_idx": {
+					"name": "tool_cache_toolName_idx",
+					"columns": ["toolName"],
+					"isUnique": false
+				},
+				"tool_cache_expiresAt_idx": {
+					"name": "tool_cache_expiresAt_idx",
+					"columns": ["expiresAt"],
+					"isUnique": false
+				}
+			},
+			"foreignKeys": {},
+			"compositePrimaryKeys": {},
+			"uniqueConstraints": {},
+			"checkConstraints": {}
+		}
+	},
+	"views": {},
+	"enums": {},
+	"_meta": {
+		"schemas": {},
+		"tables": {},
+		"columns": {}
+	},
+	"internal": {
+		"indexes": {}
+	}
+}

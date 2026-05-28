@@ -1,0 +1,13 @@
+{
+	"extends": "../../tsconfig.base.json",
+	"compilerOptions": {
+		"exactOptionalPropertyTypes": false,
+		"paths": {
+			"@server/*": ["./src/*"],
+			"@nightcode/shared": ["../shared/src/index.ts"],
+			"@nightcode/shared/*": ["../shared/src/*"],
+			"@nightcode/database": ["../database/src/index.ts"],
+			"@nightcode/database/*": ["../database/src/*"]
+		}
+	}
+}

@@ -1,0 +1,23 @@
+{
+	"name": "@nightcode/database",
+	"type": "module",
+	"private": true,
+	"exports": {
+		".": "./src/index.ts",
+		"./client": "./src/client.ts",
+		"./schema": "./src/schema.ts"
+	},
+	"scripts": {
+		"build": "bun build src/index.ts --outdir dist --target bun --minify --sourcemap=external",
+		"db:generate": "bun node_modules/drizzle-kit/bin.cjs generate",
+		"db:push": "bun node_modules/drizzle-kit/bin.cjs push",
+		"db:studio": "bun node_modules/drizzle-kit/bin.cjs studio",
+		"db:migrate": "bun node_modules/drizzle-kit/bin.cjs migrate"
+	},
+	"dependencies": {
+		"drizzle-orm": "^0.45.2"
+	},
+	"devDependencies": {
+		"drizzle-kit": "^0.31.10"
+	}
+}

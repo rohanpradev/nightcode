@@ -1,0 +1,35 @@
+{
+	"name": "nightcode",
+	"module": "index.ts",
+	"type": "module",
+	"private": true,
+	"packageManager": "bun@1.3.14",
+	"devDependencies": {
+		"@biomejs/biome": "^2.4.15",
+		"@typescript/native-preview": "7.0.0-dev.20260527.2"
+	},
+	"scripts": {
+		"dev": "bun run --filter '@nightcode/*' dev",
+		"dev:cli": "bun run --watch packages/cli/src/index.tsx",
+		"dev:server": "bun run --cwd packages/server dev",
+		"build": "bun run --filter '@nightcode/*' build",
+		"build:cli": "bun run --cwd packages/cli build",
+		"build:cli:compile": "bun run --cwd packages/cli build:compile",
+		"db:generate": "bun run --cwd packages/database db:generate",
+		"db:push": "bun run --cwd packages/database db:push",
+		"db:studio": "bun run --cwd packages/database db:studio",
+		"db:migrate": "bun run --cwd packages/database db:migrate",
+		"check": "bun run format:check && bun run lint && bun run typecheck",
+		"check:fix": "bunx --bun @biomejs/biome check --write .",
+		"format": "bunx --bun @biomejs/biome format --write .",
+		"format:check": "bunx --bun @biomejs/biome format .",
+		"lint": "bunx --bun @biomejs/biome check .",
+		"typecheck": "bunx --bun tsgo --noEmit --checkers 8 -p packages/cli/tsconfig.json && bunx --bun tsgo --noEmit --checkers 8 -p packages/server/tsconfig.json && bunx --bun tsgo --noEmit --checkers 8 -p packages/shared/tsconfig.json && bunx --bun tsgo --noEmit --checkers 8 -p packages/database/tsconfig.json",
+		"clean": "bun -e \"await Promise.all(['packages/cli/dist','packages/server/dist','packages/database/dist','packages/shared/dist'].map((path)=>Bun.file(path).delete().catch(()=>{})))\""
+	},
+	"workspaces": [
+		"packages/*",
+		"!packages/**/test/**",
+		"!packages/**/template/**"
+	]
+}

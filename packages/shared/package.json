@@ -1,0 +1,17 @@
+{
+	"name": "@nightcode/shared",
+	"type": "module",
+	"private": true,
+	"exports": {
+		".": "./src/index.ts",
+		"./models": "./src/models.ts",
+		"./schemas": "./src/schemas.ts"
+	},
+	"scripts": {
+		"build": "bun build src/index.ts --outdir dist --target bun --minify --sourcemap=external"
+	},
+	"dependencies": {
+		"ai": "7.0.0-canary.152",
+		"zod": "^4.4.3"
+	}
+}

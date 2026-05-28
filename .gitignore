@@ -1,0 +1,54 @@
+# Dependencies
+node_modules/
+
+# Build output and packages
+dist/
+out/
+build/
+*.tgz
+
+# Coverage
+coverage/
+*.lcov
+
+# Logs and diagnostics
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+bun-debug.log*
+report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Local databases
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+
+# Caches
+.cache/
+.eslintcache
+.turbo/
+.vite/
+.bun/
+*.tsbuildinfo
+
+# Editor and OS files
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Temporary files
+tmp/
+temp/
+*.tmp

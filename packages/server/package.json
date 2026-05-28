@@ -1,0 +1,27 @@
+{
+	"name": "@nightcode/server",
+	"type": "module",
+	"private": true,
+	"exports": {
+		".": "./src/index.ts",
+		"./lib/context-engine": "./src/lib/context-engine.ts",
+		"./services/llm": "./src/services/llm.ts"
+	},
+	"scripts": {
+		"dev": "bun run --hot src/index.ts",
+		"build": "bun build src/index.ts --outdir dist --target bun --minify --sourcemap=external"
+	},
+	"dependencies": {
+		"@ai-sdk/anthropic": "4.0.0-canary.59",
+		"@ai-sdk/azure": "4.0.0-canary.63",
+		"@ai-sdk/openai": "4.0.0-canary.63",
+		"@hono/zod-validator": "^0.8.0",
+		"@nightcode/database": "workspace:*",
+		"@nightcode/shared": "workspace:*",
+		"ai": "7.0.0-canary.152",
+		"dotenv": "^17.4.2",
+		"drizzle-orm": "^0.45.2",
+		"hono": "^4.12.22",
+		"zod": "^4.4.3"
+	}
+}

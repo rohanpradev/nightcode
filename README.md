@@ -2,6 +2,8 @@
 
 Terminal-first AI coding agent built with Bun workspaces, Hono, and Vercel AI SDK v7.
 
+![Night Code terminal demo](assets/nightcode-demo.gif)
+
 ## Setup
 
 Create a `.env` file in the workspace root:

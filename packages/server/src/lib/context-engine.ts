@@ -35,6 +35,11 @@ export interface ContextConfig {
 const symbolIndex = new Map<string, CodeSymbol[]>();
 const fileModTimes = new Map<string, number>();
 
+export function clearRepositoryIndex(): void {
+	symbolIndex.clear();
+	fileModTimes.clear();
+}
+
 /** Extract symbols from TypeScript/JavaScript using regex (fast, no tree-sitter needed) */
 export function extractSymbols(content: string, filePath: string): CodeSymbol[] {
 	const symbols: CodeSymbol[] = [];

@@ -50,12 +50,14 @@ export function CommandMenu({
 				ref={scrollRef}
 				height={Math.min(filteredCommands.length, MAX_VISIBLE_ITEMS)}
 				overflow="hidden"
+				viewportCulling
 			>
 				{filteredCommands.map((cmd, index) => {
 					const isSelected = index === safeIndex;
 					return (
 						// biome-ignore lint/a11y/noStaticElementInteractions: Terminal UI component, n/a
 						<box
+							id={`command-${cmd.name}`}
 							key={cmd.value}
 							flexDirection="row"
 							paddingX={1}

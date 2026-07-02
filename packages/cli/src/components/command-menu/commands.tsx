@@ -10,8 +10,9 @@ export const COMMANDS: CommandItem[] = [
 	},
 	{
 		name: "add",
-		description: "Add a file to context (e.g. /add src/index.ts)",
+		description: "Add a file to pinned context",
 		value: "/add",
+		inputTemplate: "/add ",
 		action: ({ showCommandUsage }) => showCommandUsage("/add <file-path>"),
 	},
 	{
@@ -28,15 +29,24 @@ export const COMMANDS: CommandItem[] = [
 	},
 	{
 		name: "allow",
-		description: "Grant access to an external path (e.g. /allow ~/projects)",
+		description: "Grant access to an external directory",
 		value: "/allow",
+		inputTemplate: "/allow ",
 		action: ({ showCommandUsage }) => showCommandUsage("/allow <directory-path>"),
 	},
 	{
 		name: "cwd",
-		description: "Change the working directory (e.g. /cwd ~/project)",
+		description: "Alias for /workspace",
 		value: "/cwd",
+		inputTemplate: "/cwd ",
 		action: ({ showCommandUsage }) => showCommandUsage("/cwd <directory-path>"),
+	},
+	{
+		name: "workspace",
+		description: "Open or switch the active repository",
+		value: "/workspace",
+		inputTemplate: "/workspace ",
+		action: ({ showCommandUsage }) => showCommandUsage("/workspace <directory-path>"),
 	},
 	{
 		name: "new",
@@ -54,14 +64,22 @@ export const COMMANDS: CommandItem[] = [
 	},
 	{
 		name: "model",
-		description: "Switch model (e.g. /model gpt-5.4)",
+		description: "Switch model",
 		value: "/model",
+		inputTemplate: "/model ",
 		action: ({ showCommandUsage }) => showCommandUsage("/model <model-id>"),
+	},
+	{
+		name: "models",
+		description: "List known models for the active provider",
+		value: "/models",
+		action: ({ showModels }) => showModels(),
 	},
 	{
 		name: "provider",
 		description: "Switch provider: azure | anthropic | openai",
 		value: "/provider",
+		inputTemplate: "/provider ",
 		action: ({ showCommandUsage }) => showCommandUsage("/provider azure|anthropic|openai"),
 	},
 	{
@@ -91,9 +109,33 @@ export const COMMANDS: CommandItem[] = [
 	},
 	{
 		name: "memory",
-		description: "Show or edit persistent memory / project instructions",
+		description: "Show loaded project instructions and memory sources",
 		value: "/memory",
 		action: ({ showMemory }) => showMemory(),
+	},
+	{
+		name: "skills",
+		description: "Show available project and global agent skills",
+		value: "/skills",
+		action: ({ showSkills }) => showSkills(),
+	},
+	{
+		name: "agents",
+		description: "Show custom agent profiles",
+		value: "/agents",
+		action: ({ showAgentProfiles }) => showAgentProfiles(),
+	},
+	{
+		name: "lsp",
+		description: "Show configured language servers",
+		value: "/lsp",
+		action: ({ showLspServers }) => showLspServers(),
+	},
+	{
+		name: "todo",
+		description: "Show the current agent task plan",
+		value: "/todo",
+		action: ({ showTaskPlan }) => showTaskPlan(),
 	},
 	{
 		name: "doctor",
@@ -154,7 +196,7 @@ export const COMMANDS: CommandItem[] = [
 	},
 	{
 		name: "undo",
-		description: "Undo the last AI-generated change (git reset)",
+		description: "Show safe undo options for the current repository",
 		value: "/undo",
 		shortcut: "Ctrl+Z",
 		action: ({ undoLastChange }) => undoLastChange(),
@@ -182,6 +224,19 @@ export const COMMANDS: CommandItem[] = [
 		description: "List and resume previous sessions",
 		value: "/sessions",
 		action: ({ listSessions }) => listSessions(),
+	},
+	{
+		name: "continue",
+		description: "Resume the latest saved session for this workspace",
+		value: "/continue",
+		action: ({ continueSession }) => continueSession(),
+	},
+	{
+		name: "resume",
+		description: "Resume a saved session",
+		value: "/resume",
+		inputTemplate: "/resume ",
+		action: ({ showCommandUsage }) => showCommandUsage("/resume <session-id>"),
 	},
 	{
 		name: "exit",

@@ -5,8 +5,8 @@
 	"private": true,
 	"packageManager": "bun@1.3.14",
 	"devDependencies": {
-		"@biomejs/biome": "^2.4.15",
-		"@typescript/native-preview": "7.0.0-dev.20260527.2"
+		"@biomejs/biome": "^2.5.2",
+		"@typescript/native-preview": "7.0.0-dev.20260701.1"
 	},
 	"scripts": {
 		"dev": "bun run --filter '@nightcode/*' dev",
@@ -15,6 +15,9 @@
 		"build": "bun run --filter '@nightcode/*' build",
 		"build:cli": "bun run --cwd packages/cli build",
 		"build:cli:compile": "bun run --cwd packages/cli build:compile",
+		"link:cli": "bun link --cwd packages/cli",
+		"test": "bun test",
+		"test:server": "bun test packages/server/src",
 		"db:generate": "bun run --cwd packages/database db:generate",
 		"db:push": "bun run --cwd packages/database db:push",
 		"db:studio": "bun run --cwd packages/database db:studio",

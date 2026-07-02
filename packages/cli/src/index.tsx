@@ -1,30 +1,49 @@
-import { resolve } from "node:path";
+import { stat } from "node:fs/promises";
 import { COMMANDS } from "@cli/components/command-menu/commands";
 import type { CommandContext } from "@cli/components/command-menu/types";
+import { ConversationPane } from "@cli/components/conversation-pane";
 import { Header } from "@cli/components/header";
 import { InputBar } from "@cli/components/input-bar";
-import { Spinner } from "@cli/components/spinner";
 import { gracefulExit, setRenderer } from "@cli/services/lifecycle";
 import { type LLMMessage, type LLMProvider, llm } from "@cli/services/llm";
 import {
+	createSessionId,
+	listStoredSessions,
+	loadLatestStoredSession,
+	loadStoredSession,
+	type StoredSession,
+	saveStoredSession,
+	titleFromMessages,
+} from "@cli/services/sessions";
+import {
+	applyInitialWorkspace,
+	compatibleModelForProvider,
+	isDoctorCommand,
+	isUiSmokeCommand,
+	resolveStartupState,
+	runDoctor,
+	uiSmokeMs,
+} from "@cli/services/startup";
+import type { ToolActivity } from "@cli/services/tool-activity";
+import { parseSlashCommand, resolveUserPath } from "@cli/slash-commands";
+import { discoverAgentProfiles } from "@nightcode/server/lib/agent-profiles";
+import {
+	clearRepositoryIndex,
 	compactMessages,
 	generateRepomap,
 	getSymbolCount,
 	indexDirectory,
 } from "@nightcode/server/lib/context-engine";
-import { findSupportedChatModel } from "@nightcode/shared";
-import { createCliRenderer, type ScrollBoxRenderable, TextAttributes } from "@opentui/core";
+import { discoverLspServers } from "@nightcode/server/lib/lsp-config";
+import { discoverSkills } from "@nightcode/server/lib/skills";
+import {
+	findSupportedChatModel,
+	getProviderForModel,
+	supportedChatModels,
+} from "@nightcode/shared";
+import { createCliRenderer, type ScrollBoxRenderable } from "@opentui/core";
 import { createRoot } from "@opentui/react";
 import { useCallback, useEffect, useRef, useState } from "react";
-
-type ToolActivity = {
-	id: string;
-	name: string;
-	args: Record<string, unknown>;
-	result?: string;
-	startedAt: number;
-	durationMs?: number;
-};
 
 type SessionStats = {
 	startedAt: number;
@@ -33,33 +52,33 @@ type SessionStats = {
 	lastLatencyMs?: number;
 };
 
-function formatToolArgs(activity: ToolActivity): string {
-	const { name, args } = activity;
-	switch (name) {
-		case "shell":
-			return String(args.command ?? "").slice(0, 50);
-		case "readFile":
-		case "writeFile":
-			return String(args.path ?? "");
-		case "editFile":
-			return String(args.path ?? "");
-		case "multiEdit":
-			return `${args.path} (${Array.isArray(args.edits) ? args.edits.length : 0} edits)`;
-		case "readLines":
-			return `${args.path}:${args.startLine}-${args.endLine}`;
-		case "grep":
-			return `/${String(args.pattern ?? "").slice(0, 25)}/${args.include ?? ""}`;
-		case "glob":
-			return String(args.pattern ?? "");
-		case "listFiles":
-			return String(args.path ?? ".");
-		default:
-			return JSON.stringify(args).slice(0, 40);
-	}
-}
+const MAX_PINNED_FILE_CHARS = 250_000;
 
-function App() {
-	const [messages, setMessages] = useState<LLMMessage[]>([]);
+type WorkspaceSwitchOptions = {
+	announce?: boolean;
+	resetSession?: boolean;
+};
+
+function App({
+	initialWorkspaceRoot,
+	initialWorkspaceWarning,
+	initialSession,
+}: {
+	initialWorkspaceRoot: string;
+	initialWorkspaceWarning?: string;
+	initialSession?: StoredSession;
+}) {
+	const [messages, setMessages] = useState<LLMMessage[]>(() =>
+		initialSession
+			? [
+					...initialSession.messages,
+					{
+						role: "system",
+						content: `Resumed session ${initialSession.id} (${initialSession.title})`,
+					},
+				]
+			: [],
+	);
 	const [streamingText, setStreamingText] = useState("");
 	const [isLoading, setIsLoading] = useState(false);
 	const [model, setModel] = useState(llm.config.model);
@@ -74,18 +93,62 @@ function App() {
 		toolCalls: 0,
 	});
 	const [toolActivities, setToolActivities] = useState<ToolActivity[]>([]);
-	const [fileContext, setFileContext] = useState<Map<string, string>>(new Map());
+	const [fileContext, setFileContext] = useState<Map<string, string>>(
+		() => new Map(initialSession?.fileContext.map((entry) => [entry.path, entry.content]) ?? []),
+	);
+	const [workspaceRoot, setWorkspaceRoot] = useState(initialWorkspaceRoot);
+	const [sessionId, setSessionId] = useState(() => initialSession?.id ?? createSessionId());
+	const [sessionCreatedAt, setSessionCreatedAt] = useState(
+		() => initialSession?.createdAt ?? Date.now(),
+	);
 	const scrollRef = useRef<ScrollBoxRenderable | null>(null);
+	const messageKeysRef = useRef(new WeakMap<LLMMessage, string>());
 
 	// biome-ignore lint/correctness/useExhaustiveDependencies: scroll on any content change
 	useEffect(() => {
 		scrollRef.current?.scrollTo(Infinity);
 	}, [messages, streamingText, toolActivities]);
 
+	useEffect(() => {
+		if (messages.length === 0 && fileContext.size === 0) return;
+
+		const timeout = setTimeout(() => {
+			void saveStoredSession({
+				id: sessionId,
+				title: titleFromMessages(messages),
+				cwd: workspaceRoot,
+				createdAt: sessionCreatedAt,
+				updatedAt: Date.now(),
+				messages,
+				fileContext: Array.from(fileContext.entries()).map(([path, content]) => ({
+					path,
+					content,
+				})),
+			});
+		}, 300);
+
+		return () => clearTimeout(timeout);
+	}, [fileContext, messages, sessionCreatedAt, sessionId, workspaceRoot]);
+
 	const systemMessage = useCallback(
 		(content: string) => setMessages((prev) => [...prev, { role: "system", content }]),
 		[],
 	);
+
+	useEffect(() => {
+		if (initialWorkspaceWarning) {
+			systemMessage(initialWorkspaceWarning);
+		}
+	}, [initialWorkspaceWarning, systemMessage]);
+
+	const getMessageKey = useCallback((message: LLMMessage) => {
+		const existing = messageKeysRef.current.get(message);
+		if (existing) return existing;
+
+		const next = crypto.randomUUID();
+		messageKeysRef.current.set(message, next);
+		return next;
+	}, []);
 
 	const clearMessages = useCallback(() => {
 		setMessages([]);
@@ -93,11 +156,59 @@ function App() {
 	}, []);
 
 	const newConversation = useCallback(() => {
+		setSessionId(createSessionId());
+		setSessionCreatedAt(Date.now());
 		setMessages([{ role: "system", content: "Started a new conversation." }]);
 		setStreamingText("");
 		setTokenUsage({ input: 0, output: 0 });
 		setSessionStats({ startedAt: Date.now(), requests: 0, toolCalls: 0 });
 	}, []);
+
+	const switchWorkspace = useCallback(
+		async (path: string, options: WorkspaceSwitchOptions = {}) => {
+			const resolved = resolveUserPath(path);
+			const info = await stat(resolved);
+			if (!info.isDirectory()) {
+				throw new Error(`Not a directory: ${resolved}`);
+			}
+
+			process.chdir(resolved);
+			llm.setWorkspace(resolved);
+			clearRepositoryIndex();
+
+			setWorkspaceRoot(process.cwd());
+			setFileContext(new Map());
+			setStreamingText("");
+			setToolActivities([]);
+			setModel(llm.config.model);
+			setProvider(llm.config.provider);
+			setAgentMode(llm.config.agentMode);
+
+			const announce = options.announce ?? true;
+			if (options.resetSession ?? true) {
+				const now = Date.now();
+				setSessionId(createSessionId());
+				setSessionCreatedAt(now);
+				setTokenUsage({ input: 0, output: 0 });
+				setSessionStats({ startedAt: now, requests: 0, toolCalls: 0 });
+				setMessages(
+					announce
+						? [
+								{
+									role: "system",
+									content: `Workspace -> ${process.cwd()}\nFile context cleared. Agent access reset to this workspace plus configured allowed paths.`,
+								},
+							]
+						: [],
+				);
+			} else if (announce) {
+				systemMessage(`Workspace -> ${process.cwd()}`);
+			}
+
+			return process.cwd();
+		},
+		[systemMessage],
+	);
 
 	const showHelp = useCallback(() => {
 		const lines = [
@@ -116,20 +227,33 @@ function App() {
 
 	const handleSetModel = useCallback(
 		(newModel: string) => {
-			llm.configure({ model: newModel });
+			const inferredProvider = provider === "azure" ? undefined : getProviderForModel(newModel);
+			const nextProvider = inferredProvider ?? provider;
+			llm.configure({ provider: nextProvider, model: newModel });
+			setProvider(nextProvider);
 			setModel(newModel);
-			systemMessage(`Model \u2192 ${newModel}`);
+			systemMessage(
+				nextProvider === provider
+					? `Model \u2192 ${newModel}`
+					: `Provider \u2192 ${nextProvider}\nModel \u2192 ${newModel}`,
+			);
 		},
-		[systemMessage],
+		[provider, systemMessage],
 	);
 
 	const handleSetProvider = useCallback(
 		(p: LLMProvider) => {
-			llm.configure({ provider: p });
+			const nextModel = compatibleModelForProvider(p, model);
+			llm.configure({ provider: p, model: nextModel });
 			setProvider(p);
-			systemMessage(`Provider \u2192 ${p}`);
+			setModel(nextModel);
+			systemMessage(
+				nextModel === model
+					? `Provider \u2192 ${p}`
+					: `Provider \u2192 ${p}\nModel \u2192 ${nextModel}`,
+			);
 		},
-		[systemMessage],
+		[model, systemMessage],
 	);
 
 	const handleToggleAgent = useCallback(() => {
@@ -138,7 +262,7 @@ function App() {
 		setAgentMode(next);
 		systemMessage(
 			next
-				? "Agent mode ON \u2014 tools enabled (shell, file read/write, web search)"
+				? "Agent mode ON \u2014 tools enabled (shell, files, skills, grep/glob)"
 				: "Agent mode OFF \u2014 plain chat only",
 		);
 	}, [systemMessage]);
@@ -164,7 +288,7 @@ function App() {
 			`  Agent mode:  ${agentMode ? "ON \u2713" : "OFF"}`,
 			`  Compact:     ${compactMode ? "ON" : "OFF"}`,
 			`  Vim mode:    ${vimMode ? "ON" : "OFF"}`,
-			`  CWD:         ${process.cwd()}`,
+			`  Workspace:   ${workspaceRoot}`,
 			`  Context:     ${fileContext.size} file(s)`,
 			`  Max tokens:  ${llm.config.maxTokens}`,
 			`  Temperature: ${llm.config.temperature}`,
@@ -172,12 +296,33 @@ function App() {
 			...providers.map((p) => `    ${p.available ? "\u2713" : "\u2717"} ${p.provider}`),
 		];
 		systemMessage(lines.join("\n"));
-	}, [provider, model, agentMode, compactMode, vimMode, fileContext.size, systemMessage]);
+	}, [
+		provider,
+		model,
+		agentMode,
+		compactMode,
+		vimMode,
+		workspaceRoot,
+		fileContext.size,
+		systemMessage,
+	]);
 
 	const handleShowCost = useCallback(() => {
 		const modelInfo = findSupportedChatModel(model);
-		const inputRate = modelInfo?.pricing.inputUsdPerMillionTokens ?? 3;
-		const outputRate = modelInfo?.pricing.outputUsdPerMillionTokens ?? 15;
+		if (!modelInfo?.pricing) {
+			const lines = [
+				"\u2500\u2500\u2500 Session Cost \u2500\u2500\u2500",
+				`  Input tokens:  ${tokenUsage.input.toLocaleString()}`,
+				`  Output tokens: ${tokenUsage.output.toLocaleString()}`,
+				`  Total tokens:  ${(tokenUsage.input + tokenUsage.output).toLocaleString()}`,
+				`  Pricing:       unavailable for ${provider}/${model}`,
+			];
+			systemMessage(lines.join("\n"));
+			return;
+		}
+
+		const inputRate = modelInfo.pricing.inputUsdPerMillionTokens;
+		const outputRate = modelInfo.pricing.outputUsdPerMillionTokens;
 		const inputCost = (tokenUsage.input / 1_000_000) * inputRate;
 		const outputCost = (tokenUsage.output / 1_000_000) * outputRate;
 		const totalCost = inputCost + outputCost;
@@ -193,16 +338,141 @@ function App() {
 		systemMessage(lines.join("\n"));
 	}, [tokenUsage, provider, model, systemMessage]);
 
+	const handleShowModels = useCallback(() => {
+		const knownModels = supportedChatModels.filter((entry) => entry.provider === provider);
+		if (provider === "azure") {
+			systemMessage(
+				[
+					"\u2500\u2500\u2500 Models \u2500\u2500\u2500",
+					"  Azure uses your deployment name as the model id.",
+					`  Current deployment: ${model}`,
+					"  Set with /model <deployment-id>.",
+				].join("\n"),
+			);
+			return;
+		}
+
+		if (knownModels.length === 0) {
+			systemMessage(`No known models registered for ${provider}. Use /model <model-id>.`);
+			return;
+		}
+
+		const lines = [
+			"\u2500\u2500\u2500 Models \u2500\u2500\u2500",
+			...knownModels.map((entry) => {
+				const active = entry.id === model ? "*" : " ";
+				const fallback = entry.defaultForProvider ? " default" : "";
+				const price = entry.pricing
+					? ` $${entry.pricing.inputUsdPerMillionTokens}/M in, $${entry.pricing.outputUsdPerMillionTokens}/M out`
+					: " pricing n/a";
+				return `  ${active} ${entry.id.padEnd(24)} ${entry.label}${fallback};${price}`;
+			}),
+			"",
+			"Use /model <model-id> to switch.",
+		];
+		systemMessage(lines.join("\n"));
+	}, [model, provider, systemMessage]);
+
 	const handleShowMemory = useCallback(() => {
 		const lines = [
 			"\u2500\u2500\u2500 Memory \u2500\u2500\u2500",
-			"  Project instructions and memory are loaded from:",
-			"  \u2022 .claudecode (project root)",
-			"  \u2022 ~/.config/claudecode/memory.md (global)",
-			"  To edit project memory, create or modify .claudecode",
-			"  in your project root with markdown instructions.",
+			"  Project instructions are loaded from:",
+			"  \u2022 .nightcode/instructions.md",
+			"  \u2022 AGENTS.md",
+			"  \u2022 .github/copilot-instructions.md",
+			"  \u2022 CLAUDE.md, GEMINI.md, .cursor/rules, .codex/instructions.md",
+			"  Agent skills can live in .agents/skills or .github/skills.",
+			"  Custom profiles can live in .github/agents.",
 			`  Current system prompt: ${llm.config.systemPrompt ? "custom" : "default"}`,
 		];
+		systemMessage(lines.join("\n"));
+	}, [systemMessage]);
+
+	const handleShowSkills = useCallback(() => {
+		const skills = discoverSkills(workspaceRoot);
+		if (skills.length === 0) {
+			systemMessage(
+				"No skills found. Add SKILL.md files under .agents/skills, .github/skills, or .nightcode/skills.",
+			);
+			return;
+		}
+
+		const lines = [
+			"\u2500\u2500\u2500 Skills \u2500\u2500\u2500",
+			...skills.map(
+				(skill) =>
+					`  ${skill.id.padEnd(18)} ${skill.scope.padEnd(7)} ${skill.name} - ${skill.description}`,
+			),
+			"",
+			"The agent can use listSkills and loadSkill during a task.",
+		];
+		systemMessage(lines.join("\n"));
+	}, [systemMessage, workspaceRoot]);
+
+	const handleShowAgentProfiles = useCallback(() => {
+		const profiles = discoverAgentProfiles(workspaceRoot);
+		if (profiles.length === 0) {
+			systemMessage("No custom agent profiles found. Add Markdown files under .github/agents.");
+			return;
+		}
+
+		const lines = [
+			"\u2500\u2500\u2500 Custom Agents \u2500\u2500\u2500",
+			...profiles.map(
+				(profile) =>
+					`  ${profile.id.padEnd(18)} ${profile.scope.padEnd(7)} ${profile.name} - ${profile.description}`,
+			),
+			"",
+			"The agent can use listAgentProfiles and loadAgentProfile during a task.",
+		];
+		systemMessage(lines.join("\n"));
+	}, [systemMessage, workspaceRoot]);
+
+	const handleShowLspServers = useCallback(() => {
+		const servers = discoverLspServers(workspaceRoot);
+		if (servers.length === 0) {
+			systemMessage(
+				"No LSP servers configured. Add .github/lsp.json, .nightcode/lsp.json, or ~/.copilot/lsp-config.json.",
+			);
+			return;
+		}
+
+		const lines = [
+			"\u2500\u2500\u2500 LSP Servers \u2500\u2500\u2500",
+			...servers.map((server) => {
+				const extensions = server.fileExtensions
+					? ` [${Object.keys(server.fileExtensions).join(", ")}]`
+					: "";
+				return `  ${server.id.padEnd(18)} ${server.scope.padEnd(7)} ${
+					server.command ?? "(command not set)"
+				}${extensions}`;
+			}),
+		];
+		systemMessage(lines.join("\n"));
+	}, [systemMessage, workspaceRoot]);
+
+	const handleShowTaskPlan = useCallback(() => {
+		const plan = llm.getTaskPlan();
+		if (plan.items.length === 0) {
+			systemMessage("No active task plan. The agent will create one before mutating files.");
+			return;
+		}
+
+		const lines = [
+			"\u2500\u2500\u2500 Task Plan \u2500\u2500\u2500",
+			plan.summary ? `  Summary: ${plan.summary}` : "  Summary: n/a",
+			...plan.items.map((item) => {
+				const note = item.note ? ` - ${item.note}` : "";
+				return `  ${item.status.padEnd(11)} ${item.id}: ${item.title}${note}`;
+			}),
+		];
+		if (plan.verification.length > 0) {
+			lines.push("", "  Verification:");
+			lines.push(...plan.verification.map((entry) => `  - ${entry}`));
+		}
+		if (plan.updatedAt) {
+			lines.push("", `  Updated: ${plan.updatedAt}`);
+		}
 		systemMessage(lines.join("\n"));
 	}, [systemMessage]);
 
@@ -243,7 +513,9 @@ function App() {
 		// Check providers
 		for (const p of providers) {
 			checks.push(
-				`  ${p.available ? "\u2713" : "\u2717"} ${p.provider} ${p.available ? "connected" : "not configured"}`,
+				`  ${p.available ? "\u2713" : "\u2717"} ${p.provider} ${
+					p.available ? "ready" : (p.reason ?? "not configured")
+				}`,
 			);
 		}
 		checks.push("");
@@ -255,13 +527,13 @@ function App() {
 		} else {
 			checks.push(`  \u2717 Active provider (${provider}) is not available`);
 			checks.push(
-				`  Run: export ${
+				`  Configure ${
 					provider === "anthropic"
 						? "ANTHROPIC_API_KEY"
 						: provider === "openai"
 							? "OPENAI_API_KEY"
 							: "AZURE_API_KEY"
-				}=<key>`,
+				} before sending requests.`,
 			);
 		}
 		checks.push("");
@@ -269,7 +541,9 @@ function App() {
 		// Agent mode status
 		if (agentMode) {
 			checks.push("  \u2713 Agent mode enabled");
-			checks.push("  Tools: shell_exec, file_read, file_write, web_search");
+			checks.push(
+				"  Tools: updateTaskPlan, shell, readFile, readLines, writeFile, editFile, multiEdit, listFiles, fileInfo, listAgentProfiles, loadAgentProfile, listSkills, loadSkill, listLspServers, glob, grep",
+			);
 		} else {
 			checks.push("  \u2022 Agent mode disabled (use /agent to enable)");
 		}
@@ -283,26 +557,92 @@ function App() {
 		const lines = [
 			"\u2500\u2500\u2500 Session Stats \u2500\u2500\u2500",
 			`  Requests:     ${sessionStats.requests}`,
+			`  Session:      ${sessionId}`,
 			`  Tool calls:   ${sessionStats.toolCalls}`,
 			`  Tokens:       ${(tokenUsage.input + tokenUsage.output).toLocaleString()}`,
 			`  Uptime:       ${uptimeSec}s`,
 			`  Last latency: ${sessionStats.lastLatencyMs == null ? "n/a" : `${sessionStats.lastLatencyMs}ms`}`,
 		];
 		systemMessage(lines.join("\n"));
-	}, [sessionStats, tokenUsage, systemMessage]);
+	}, [sessionStats, sessionId, tokenUsage, systemMessage]);
+
+	const handleListSessions = useCallback(async () => {
+		const sessions = await listStoredSessions({ cwd: workspaceRoot });
+		if (sessions.length === 0) {
+			systemMessage(`No saved sessions for workspace ${workspaceRoot}.`);
+			return;
+		}
+
+		const lines = [
+			"\u2500\u2500\u2500 Sessions \u2500\u2500\u2500",
+			...sessions.map((session) => {
+				const updated = new Date(session.updatedAt).toLocaleString();
+				return `  ${session.id}  ${updated}  ${session.title}  (${session.cwd})`;
+			}),
+			"",
+			"Use /resume <session-id> to restore one.",
+			"Startup flags also work: nightcode --continue or nightcode --resume <session-id>.",
+		];
+		systemMessage(lines.join("\n"));
+	}, [systemMessage, workspaceRoot]);
+
+	const handleResumeSession = useCallback(
+		async (id: string) => {
+			const session = await loadStoredSession(id);
+			if (!session) {
+				systemMessage(`Session not found or ambiguous: ${id}`);
+				return;
+			}
+
+			try {
+				await switchWorkspace(session.cwd, { announce: false, resetSession: false });
+			} catch (error) {
+				systemMessage(
+					`Cannot resume ${session.id}: workspace unavailable at ${session.cwd} (${
+						error instanceof Error ? error.message : String(error)
+					})`,
+				);
+				return;
+			}
+
+			setSessionId(session.id);
+			setSessionCreatedAt(session.createdAt);
+			setMessages([
+				...session.messages,
+				{
+					role: "system",
+					content: `Resumed session ${session.id} (${session.title})`,
+				},
+			]);
+			setFileContext(new Map(session.fileContext.map((entry) => [entry.path, entry.content])));
+			setStreamingText("");
+			setToolActivities([]);
+		},
+		[systemMessage, switchWorkspace],
+	);
+
+	const handleContinueSession = useCallback(async () => {
+		const session = await loadLatestStoredSession(workspaceRoot);
+		if (!session) {
+			systemMessage(`No saved session for workspace ${workspaceRoot}.`);
+			return;
+		}
+
+		await handleResumeSession(session.id);
+	}, [handleResumeSession, systemMessage, workspaceRoot]);
 
 	const handleIndexProject = useCallback(async () => {
-		const cwd = process.cwd();
-		systemMessage(`Indexing ${cwd}...`);
+		systemMessage(`Indexing ${workspaceRoot}...`);
 		try {
-			const indexedFiles = await indexDirectory(cwd);
+			clearRepositoryIndex();
+			const indexedFiles = await indexDirectory(workspaceRoot);
 			systemMessage(
 				`Indexed ${indexedFiles} file(s), ${getSymbolCount()} symbol(s). Use /map for a compact repository map.`,
 			);
 		} catch (err) {
 			systemMessage(`Index failed: ${err instanceof Error ? err.message : String(err)}`);
 		}
-	}, [systemMessage]);
+	}, [systemMessage, workspaceRoot]);
 
 	const handleShowRepoMap = useCallback(() => {
 		const symbolCount = getSymbolCount();
@@ -322,6 +662,7 @@ function App() {
 		exit: gracefulExit,
 		clear: clearMessages,
 		newConversation,
+		switchWorkspace,
 		showHelp,
 		setModel: handleSetModel,
 		setProvider: handleSetProvider,
@@ -329,16 +670,31 @@ function App() {
 		toggleCompact: handleToggleCompact,
 		showStatus: handleShowStatus,
 		showCost: handleShowCost,
+		showModels: handleShowModels,
 		showMemory: handleShowMemory,
+		showSkills: handleShowSkills,
+		showAgentProfiles: handleShowAgentProfiles,
+		showLspServers: handleShowLspServers,
+		showTaskPlan: handleShowTaskPlan,
 		showContext: handleShowContext,
 		clearFileContext: handleClearFileContext,
 		toggleVim: handleToggleVim,
 		doctor: handleDoctor,
-		undoLastChange: () => systemMessage("Reverting last AI change... (git reset --soft HEAD~1)"),
+		undoLastChange: () =>
+			systemMessage(
+				[
+					"Night Code does not create automatic checkpoints yet.",
+					"Inspect changes with: git status --short",
+					"Undo the last commit but keep files changed with: git reset --soft HEAD~1",
+					"Discard specific file edits manually only after reviewing them.",
+				].join("\n"),
+			),
 		showStats: handleShowStats,
 		indexProject: handleIndexProject,
 		showRepoMap: handleShowRepoMap,
-		listSessions: () => systemMessage("Sessions: Use /new to start a new session."),
+		listSessions: handleListSessions,
+		continueSession: handleContinueSession,
+		resumeSession: handleResumeSession,
 		submitPrompt: (prompt) => handleSubmit(prompt),
 		showCommandUsage: handleShowCommandUsage,
 		currentModel: model,
@@ -372,90 +728,111 @@ function App() {
 		}
 
 		// Handle parameterized slash commands
-		if (trimmed.startsWith("/model ")) {
-			const arg = trimmed.slice(7).trim();
-			if (arg) handleSetModel(arg);
-			return;
-		}
+		const slashCommand = parseSlashCommand(trimmed);
+		if (slashCommand) {
+			const { name, arg } = slashCommand;
 
-		if (trimmed.startsWith("/provider ")) {
-			const arg = trimmed.slice(10).trim() as LLMProvider;
-			if (["azure", "anthropic", "openai"].includes(arg)) {
-				handleSetProvider(arg);
-			} else {
-				systemMessage(`Unknown provider "${arg}". Use: azure, anthropic, openai`);
-			}
-			return;
-		}
-
-		if (trimmed.startsWith("/add ")) {
-			const filePath = trimmed.slice(5).trim();
-			if (!filePath) {
-				systemMessage("Usage: /add <file-path>");
+			if (name === "model") {
+				if (arg) handleSetModel(arg);
+				else systemMessage("Usage: /model <model-id>");
 				return;
 			}
-			try {
-				const resolvedPath = resolve(filePath.replace(/^~(?=$|[\\/])/, process.env.HOME ?? ""));
-				const file = Bun.file(resolvedPath);
-				if (!(await file.exists())) {
-					systemMessage(`File not found: ${filePath}`);
+
+			if (name === "provider") {
+				if (["azure", "anthropic", "openai"].includes(arg)) {
+					handleSetProvider(arg as LLMProvider);
+				} else {
+					systemMessage(`Unknown provider "${arg || "(empty)"}". Use: azure, anthropic, openai`);
+				}
+				return;
+			}
+
+			if (name === "add") {
+				if (!arg) {
+					systemMessage("Usage: /add <file-path>");
 					return;
 				}
-				const content = await file.text();
-				setFileContext((prev) => new Map(prev).set(resolvedPath, content));
-				systemMessage(`\u2713 Added ${resolvedPath} to context (${content.length} chars)`);
-			} catch (err) {
-				systemMessage(`Error reading file: ${err instanceof Error ? err.message : String(err)}`);
-			}
-			return;
-		}
+				try {
+					const resolvedPath = resolveUserPath(arg);
+					const info = await stat(resolvedPath);
+					if (!info.isFile()) {
+						systemMessage(`Not a file: ${resolvedPath}`);
+						return;
+					}
 
-		if (trimmed === "/context") {
-			handleShowContext();
-			return;
-		}
-
-		if (trimmed === "/clear-context") {
-			handleClearFileContext();
-			return;
-		}
-
-		if (trimmed.startsWith("/allow ")) {
-			const dirPath = trimmed.slice(7).trim();
-			if (!dirPath) {
-				systemMessage("Usage: /allow <directory-path>");
+					const file = Bun.file(resolvedPath);
+					const content = await file.text();
+					const pinnedContent =
+						content.length > MAX_PINNED_FILE_CHARS
+							? `${content.slice(0, MAX_PINNED_FILE_CHARS)}\n\n[truncated ${
+									content.length - MAX_PINNED_FILE_CHARS
+								} chars]`
+							: content;
+					setFileContext((prev) => new Map(prev).set(resolvedPath, pinnedContent));
+					systemMessage(
+						`\u2713 Added ${resolvedPath} to context (${pinnedContent.length.toLocaleString()} chars)`,
+					);
+				} catch (err) {
+					systemMessage(`Error reading file: ${err instanceof Error ? err.message : String(err)}`);
+				}
 				return;
 			}
-			const resolved = resolve(dirPath.replace(/^~(?=$|[\\/])/, process.env.HOME ?? ""));
-			llm.addAllowedPath(resolved);
-			systemMessage(`Allowed path: ${resolved}\nAgent can now read/write files there.`);
-			return;
-		}
 
-		if (trimmed.startsWith("/cwd ")) {
-			const dirPath = trimmed.slice(5).trim();
-			if (!dirPath) {
-				systemMessage("Usage: /cwd <directory-path>");
+			if (name === "allow") {
+				if (!arg) {
+					systemMessage("Usage: /allow <directory-path>");
+					return;
+				}
+				const resolved = resolveUserPath(arg);
+				try {
+					const info = await stat(resolved);
+					if (!info.isDirectory()) {
+						systemMessage(`Not a directory: ${resolved}`);
+						return;
+					}
+				} catch {
+					systemMessage(`Directory not found: ${resolved}`);
+					return;
+				}
+				llm.addAllowedPath(resolved);
+				systemMessage(`Allowed path: ${resolved}\nAgent can now read/write files there.`);
 				return;
 			}
-			const resolved = resolve(dirPath.replace(/^~(?=$|[\\/])/, process.env.HOME ?? ""));
-			try {
-				process.chdir(resolved);
-				systemMessage(`Working directory \u2192 ${process.cwd()}`);
-			} catch {
-				systemMessage(`Error: Cannot chdir to ${resolved} - directory does not exist.`);
-			}
-			return;
-		}
 
-		// Non-parameterized slash commands are handled via CommandMenu actions
-		if (trimmed.startsWith("/") && !trimmed.includes(" ")) {
-			const cmdName = trimmed.slice(1);
-			const cmd = COMMANDS.find((c) => c.name === cmdName);
-			if (cmd?.action) {
+			if (name === "cwd" || name === "workspace") {
+				if (!arg) {
+					systemMessage(`Usage: /${name} <directory-path>`);
+					return;
+				}
+				try {
+					await switchWorkspace(arg);
+				} catch (error) {
+					systemMessage(
+						`Error: Cannot open workspace ${
+							error instanceof Error ? error.message : String(error)
+						}`,
+					);
+				}
+				return;
+			}
+
+			if (name === "resume") {
+				if (!arg) {
+					systemMessage("Usage: /resume <session-id>");
+					return;
+				}
+				await handleResumeSession(arg);
+				return;
+			}
+
+			const cmd = COMMANDS.find((c) => c.name === name);
+			if (cmd?.action && !arg) {
 				cmd.action(commandContext);
 				return;
 			}
+
+			systemMessage(`Unknown command "/${name}". Type /help for available commands.`);
+			return;
 		}
 
 		// Build user message with file context
@@ -523,6 +900,9 @@ function App() {
 						break;
 					}
 
+					case "error":
+						throw new Error(chunk.error);
+
 					case "done":
 						if (chunk.usage) {
 							setTokenUsage((prev) => ({
@@ -573,183 +953,18 @@ function App() {
 				overflow="hidden"
 				gap={0}
 			>
-				<scrollbox
-					ref={scrollRef}
-					flexGrow={1}
-					flexShrink={1}
-					overflow="hidden"
-					stickyScroll
-					paddingBottom={1}
-				>
-					{!messages.length && !isLoading && (
-						<box justifyContent="center" alignItems="center" paddingY={2} gap={1}>
-							<text fg="#cba6f7" attributes={TextAttributes.BOLD}>
-								{"\u2726 Night Code"}
-							</text>
-							<text fg="#6c7086">{"Terminal-first AI coding agent"}</text>
-							<box paddingTop={1} gap={0.5} alignItems="center">
-								<box flexDirection="row" gap={1}>
-									<text fg="#585670">{"\u2022"}</text>
-									<text fg="#abadc8">{"Type a message to start coding"}</text>
-								</box>
-								<box flexDirection="row" gap={1}>
-									<text fg="#585670">{"\u2022"}</text>
-									<text fg="#abadc8">{"Use"}</text>
-									<text fg="#89b4fa" attributes={TextAttributes.BOLD}>
-										{"/"}
-									</text>
-									<text fg="#abadc8">{" for commands"}</text>
-								</box>
-								<box flexDirection="row" gap={1}>
-									<text fg="#585670">{"\u2022"}</text>
-									<text fg="#abadc8">{`${model} via ${provider}`}</text>
-									<text fg={agentMode ? "#a6e3a1" : "#585678"}>{agentMode ? " \u26a1" : ""}</text>
-								</box>
-							</box>
-						</box>
-					)}
-
-					{messages.map((msg) => (
-						<box key={`${msg.role}-${msg.content}`} overflow="hidden">
-							{msg.role === "user" && (
-								<box overflow="hidden" paddingLeft={1}>
-									<box flexDirection="row" gap={1}>
-										<text fg="#74c7ec" attributes={TextAttributes.BOLD}>
-											{"\u276f"}
-										</text>
-										<text fg="#74c7ec" attributes={TextAttributes.BOLD}>
-											You
-										</text>
-									</box>
-									<box paddingLeft={3} overflow="hidden">
-										<text fg="#cdd6f4">{msg.content}</text>
-									</box>
-								</box>
-							)}
-
-							{msg.role === "assistant" && (
-								<box overflow="hidden" flexDirection="row" paddingY={0.5} marginLeft={1}>
-									<box width={0} border={["left"]} borderColor="#cba6f7" borderStyle="heavy" />
-									<box paddingLeft={1} overflow="hidden">
-										<box flexDirection="row" gap={1} paddingBottom={0.5}>
-											<text fg="#cba6f7" attributes={TextAttributes.BOLD}>
-												{"\u2726"}
-											</text>
-											<text fg="#cba6f7" attributes={TextAttributes.BOLD}>
-												Night Code
-											</text>
-										</box>
-										<text fg="#cdd6f4">{msg.content}</text>
-									</box>
-								</box>
-							)}
-
-							{msg.role === "system" && (
-								<box flexDirection="row" gap={1} paddingLeft={2} overflow="hidden">
-									<text fg="#45475a">{"\u2500"}</text>
-									<text fg="#6c7086" attributes={TextAttributes.DIM}>
-										{msg.content}
-									</text>
-								</box>
-							)}
-						</box>
-					))}
-
-					{isLoading && streamingText && (
-						<box
-							overflow="hidden"
-							paddingBottom={0.5}
-							flexDirection="row"
-							paddingY={0.5}
-							marginLeft={1}
-						>
-							<box width={0} border={["left"]} borderColor="#89b4fa" borderStyle="heavy" />
-							<box paddingLeft={1} overflow="hidden">
-								<box flexDirection="row" gap={1} paddingBottom={0.5}>
-									<text fg="#cba6f7" attributes={TextAttributes.BOLD}>
-										{"\u2726"}
-									</text>
-									<text fg="#cba6f7" attributes={TextAttributes.BOLD}>
-										Night Code
-									</text>
-									<text fg="#f9e2af" attributes={TextAttributes.DIM}>
-										{"\u2022 streaming"}
-									</text>
-								</box>
-
-								{toolActivities.length > 0 && (
-									<box paddingBottom={0.5} gap={0}>
-										{toolActivities.map((activity) => (
-											<box
-												key={`tool-${activity.id}`}
-												flexDirection="row"
-												gap={1}
-												overflow="hidden"
-											>
-												<text fg={activity.result ? "#a6e3a1" : "#f9e2af"}>
-													{activity.result ? "\u2713" : "\u25cb"}
-												</text>
-												<text fg="#89b4fa">{activity.name}</text>
-												<text fg="#585b70" attributes={TextAttributes.DIM}>
-													{formatToolArgs(activity)}
-												</text>
-												{activity.durationMs != null && (
-													<text fg="#45475a" attributes={TextAttributes.DIM}>
-														{`${activity.durationMs}ms`}
-													</text>
-												)}
-											</box>
-										))}
-									</box>
-								)}
-
-								<box overflow="hidden">
-									<text fg="#a6adc8">{streamingText}</text>
-								</box>
-							</box>
-						</box>
-					)}
-
-					{isLoading && !streamingText && (
-						<box paddingLeft={2} paddingY={0.5}>
-							<Spinner
-								label={
-									toolActivities.length > 0
-										? `${toolActivities[toolActivities.length - 1]?.name}`
-										: "Thinking"
-								}
-								color="#cba6f7"
-							/>
-							{toolActivities.length > 0 && (
-								<box paddingLeft={3} paddingTop={0.5} gap={0}>
-									{toolActivities.map((activity) => (
-										<box
-											key={`tool-wait-${activity.id}`}
-											flexDirection="row"
-											gap={1}
-											overflow="hidden"
-										>
-											<text fg={activity.result ? "#a6e3a1" : "#f9e2af"}>
-												{activity.result ? "\u2713" : "\u25cb"}
-											</text>
-											<text fg="#89b4fa" attributes={TextAttributes.BOLD}>
-												{activity.name}
-											</text>
-											<text fg="#585b70" attributes={TextAttributes.DIM}>
-												{formatToolArgs(activity)}
-											</text>
-											{activity.durationMs != null && (
-												<text fg="#45475a" attributes={TextAttributes.DIM}>
-													{`${activity.durationMs}ms`}
-												</text>
-											)}
-										</box>
-									))}
-								</box>
-							)}
-						</box>
-					)}
-				</scrollbox>
+				<ConversationPane
+					scrollRef={scrollRef}
+					messages={messages}
+					isLoading={isLoading}
+					streamingText={streamingText}
+					toolActivities={toolActivities}
+					model={model}
+					provider={provider}
+					agentMode={agentMode}
+					workspaceRoot={workspaceRoot}
+					getMessageKey={getMessageKey}
+				/>
 
 				<InputBar onSubmit={handleSubmit} commandContext={commandContext} disabled={isLoading} />
 			</box>
@@ -757,6 +972,34 @@ function App() {
 	);
 }
 
-const renderer = await createCliRenderer();
-setRenderer(renderer);
-createRoot(renderer).render(<App />);
+async function main(): Promise<void> {
+	const initialWorkspace = await applyInitialWorkspace();
+	const startup = await resolveStartupState(initialWorkspace);
+	if (isDoctorCommand()) {
+		await runDoctor({ ...startup.workspace, warning: startup.warning });
+		process.exit(0);
+	}
+
+	const renderer = await createCliRenderer();
+	setRenderer(renderer);
+	createRoot(renderer).render(
+		<App
+			initialWorkspaceRoot={startup.workspace.root}
+			initialWorkspaceWarning={startup.warning}
+			initialSession={startup.session}
+		/>,
+	);
+
+	if (isUiSmokeCommand()) {
+		setTimeout(() => {
+			renderer.destroy();
+			process.stdout.write(`\nNightcode UI smoke OK: ${startup.workspace.root}\n`);
+			process.exit(0);
+		}, uiSmokeMs());
+	}
+}
+
+void main().catch((error) => {
+	console.error(error instanceof Error ? error.stack : error);
+	process.exit(1);
+});

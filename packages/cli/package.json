@@ -8,21 +8,21 @@
 	},
 	"scripts": {
 		"dev": "bun run --watch src/index.tsx",
-		"build": "bun build src/index.tsx --outdir dist --target bun --minify --sourcemap=external",
-		"build:bytecode": "bun build src/index.tsx --outdir dist --target bun --bytecode --minify --sourcemap=external",
-		"build:compile": "bun build src/index.tsx --compile --bytecode --minify --sourcemap=external --outfile dist/nightcode"
+		"build": "bun build src/index.tsx --outdir dist --target bun '--external=@opentui/core-darwin-x64' '--external=@opentui/core-darwin-arm64' '--external=@opentui/core-linux-x64-musl' '--external=@opentui/core-linux-x64' '--external=@opentui/core-linux-arm64-musl' '--external=@opentui/core-linux-arm64' '--external=@opentui/core-win32-arm64' --minify --sourcemap=external",
+		"build:bytecode": "bun build src/index.tsx --outdir dist --target bun '--external=@opentui/core-darwin-x64' '--external=@opentui/core-darwin-arm64' '--external=@opentui/core-linux-x64-musl' '--external=@opentui/core-linux-x64' '--external=@opentui/core-linux-arm64-musl' '--external=@opentui/core-linux-arm64' '--external=@opentui/core-win32-arm64' --bytecode --minify --sourcemap=external",
+		"build:compile": "bun build src/index.tsx --compile '--external=@opentui/core-darwin-x64' '--external=@opentui/core-darwin-arm64' '--external=@opentui/core-linux-x64-musl' '--external=@opentui/core-linux-x64' '--external=@opentui/core-linux-arm64-musl' '--external=@opentui/core-linux-arm64' '--external=@opentui/core-win32-arm64' --minify --sourcemap=external --outfile dist/nightcode.exe"
 	},
 	"devDependencies": {
 		"@types/bun": "latest",
-		"@types/react": "^19.2.15"
+		"@types/react": "^19.2.17"
 	},
 	"dependencies": {
 		"@nightcode/server": "workspace:*",
 		"@nightcode/shared": "workspace:*",
-		"@opentui/core": "^0.2.15",
-		"@opentui/react": "^0.2.15",
-		"hono": "^4.12.22",
-		"react": "^19.2.6",
+		"@opentui/core": "^0.4.2",
+		"@opentui/react": "^0.4.2",
+		"hono": "^4.12.27",
+		"react": "^19.2.7",
 		"zod": "^4.4.3"
 	}
 }

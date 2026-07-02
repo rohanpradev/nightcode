@@ -1,3 +1,5 @@
+import { createAnthropic } from "@ai-sdk/anthropic";
+import { createAzure } from "@ai-sdk/azure";
 import { createOpenAI } from "@ai-sdk/openai";
 import type { LLMConfig, SupportedProvider } from "@nightcode/shared";
 import { getProviderForModel, supportedChatModels } from "@nightcode/shared";
@@ -5,6 +7,22 @@ import type { LanguageModel } from "ai";
 import { optionalEnv } from "../lib/env";
 
 const OPENAI_DEFAULT_BASE_URL = "https://api.openai.com/v1";
+
+function anthropicAuthConfigured(): boolean {
+	return Boolean(optionalEnv("ANTHROPIC_API_KEY") ?? optionalEnv("ANTHROPIC_AUTH_TOKEN"));
+}
+
+function azureApiKey(): string | undefined {
+	return optionalEnv("AZURE_OPENAI_API_KEY") ?? optionalEnv("AZURE_API_KEY");
+}
+
+function azureBaseURL(): string | undefined {
+	return optionalEnv("AZURE_OPENAI_BASE_URL") ?? optionalEnv("AZURE_BASE_URL");
+}
+
+function azureResourceName(): string | undefined {
+	return optionalEnv("AZURE_OPENAI_RESOURCE_NAME") ?? optionalEnv("AZURE_RESOURCE_NAME");
+}
 
 export interface ProviderHealth {
 	provider: SupportedProvider;
@@ -19,8 +37,20 @@ export class ModelRouter {
 		organization: optionalEnv("OPENAI_ORG_ID"),
 		project: optionalEnv("OPENAI_PROJECT_ID"),
 	});
+	#anthropic = createAnthropic({
+		apiKey: optionalEnv("ANTHROPIC_API_KEY"),
+		authToken: optionalEnv("ANTHROPIC_AUTH_TOKEN"),
+		baseURL: optionalEnv("ANTHROPIC_BASE_URL"),
+	});
+	#azure = createAzure({
+		apiKey: azureApiKey(),
+		baseURL: azureBaseURL(),
+		resourceName: azureResourceName(),
+		apiVersion: optionalEnv("AZURE_OPENAI_API_VERSION") ?? optionalEnv("AZURE_API_VERSION"),
+	});
 
 	getAvailableProviders(): ProviderHealth[] {
+		const azureHasEndpoint = Boolean(azureBaseURL() ?? azureResourceName());
 		return [
 			{
 				provider: "openai",
@@ -29,27 +59,30 @@ export class ModelRouter {
 			},
 			{
 				provider: "anthropic",
-				available: Boolean(process.env.ANTHROPIC_API_KEY),
-				reason: process.env.ANTHROPIC_API_KEY
-					? "provider dependency is installed but not routed yet"
-					: "ANTHROPIC_API_KEY is missing",
+				available: anthropicAuthConfigured(),
+				reason: anthropicAuthConfigured()
+					? undefined
+					: "ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN is missing",
 			},
 			{
 				provider: "azure",
-				available: Boolean(process.env.AZURE_API_KEY),
-				reason: process.env.AZURE_API_KEY
-					? "provider dependency is installed but not routed yet"
-					: "AZURE_API_KEY is missing",
+				available: Boolean(azureApiKey() && azureHasEndpoint),
+				reason: !azureApiKey()
+					? "AZURE_OPENAI_API_KEY or AZURE_API_KEY is missing"
+					: azureHasEndpoint
+						? undefined
+						: "AZURE_OPENAI_RESOURCE_NAME or AZURE_OPENAI_BASE_URL is missing",
 			},
 		];
 	}
 
 	resolve(config: LLMConfig): LanguageModel {
-		const provider = getProviderForModel(config.model) ?? config.provider;
+		const catalogProvider = getProviderForModel(config.model);
+		const provider = config.provider;
 
-		if (provider !== config.provider) {
+		if (catalogProvider && catalogProvider !== provider && provider !== "azure") {
 			throw new Error(
-				`Model ${config.model} belongs to ${provider}, but provider is ${config.provider}.`,
+				`Model ${config.model} belongs to ${catalogProvider}, but provider is ${provider}.`,
 			);
 		}
 
@@ -60,7 +93,24 @@ export class ModelRouter {
 			return this.#openai.responses(config.model);
 		}
 
-		throw new Error(`${provider} routing is not implemented yet.`);
+		if (provider === "anthropic") {
+			if (!anthropicAuthConfigured()) {
+				throw new Error("ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN is required.");
+			}
+			return this.#anthropic(config.model);
+		}
+
+		if (provider === "azure") {
+			if (!azureApiKey()) {
+				throw new Error("AZURE_OPENAI_API_KEY or AZURE_API_KEY is required.");
+			}
+			if (!azureBaseURL() && !azureResourceName()) {
+				throw new Error("AZURE_OPENAI_RESOURCE_NAME or AZURE_OPENAI_BASE_URL is required.");
+			}
+			return this.#azure.responses(config.model);
+		}
+
+		throw new Error(`Unsupported provider: ${provider}`);
 	}
 
 	listModels(provider?: SupportedProvider) {

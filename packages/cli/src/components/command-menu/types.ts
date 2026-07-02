@@ -4,6 +4,7 @@ export type CommandContext = {
 	exit: () => void;
 	clear: () => void;
 	newConversation: () => void;
+	switchWorkspace: (path: string) => Promise<unknown>;
 	showHelp: () => void;
 	setModel: (model: string) => void;
 	setProvider: (provider: LLMProvider) => void;
@@ -11,7 +12,12 @@ export type CommandContext = {
 	toggleCompact: () => void;
 	showStatus: () => void;
 	showCost: () => void;
+	showModels: () => void;
 	showMemory: () => void;
+	showSkills: () => void;
+	showAgentProfiles: () => void;
+	showLspServers: () => void;
+	showTaskPlan: () => void;
 	showContext: () => void;
 	clearFileContext: () => void;
 	toggleVim: () => void;
@@ -21,6 +27,8 @@ export type CommandContext = {
 	indexProject: () => void | Promise<void>;
 	showRepoMap: () => void;
 	listSessions: () => void;
+	continueSession: () => void | Promise<void>;
+	resumeSession: (id: string) => void | Promise<void>;
 	submitPrompt: (prompt: string) => void | Promise<void>;
 	showCommandUsage: (command: string) => void;
 	currentModel: string;
@@ -34,6 +42,7 @@ export type CommandItem = {
 	name: string;
 	description: string;
 	value: string;
+	inputTemplate?: string;
 	shortcut?: string;
 	action: (context: CommandContext) => void | Promise<void>;
 };

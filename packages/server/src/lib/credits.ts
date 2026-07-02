@@ -12,7 +12,7 @@ export function calculateCreditsForUsage({
 	usage: LanguageModelUsage;
 }) {
 	const definition = findSupportedChatModel(model);
-	if (!definition) return { credits: 0 };
+	if (!definition?.pricing) return { credits: 0, provider };
 
 	const inputCost =
 		((usage.inputTokens ?? 0) / 1_000_000) * definition.pricing.inputUsdPerMillionTokens;

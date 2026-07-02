@@ -2,8 +2,8 @@ import { CommandMenu } from "@cli/components/command-menu";
 import type { CommandContext } from "@cli/components/command-menu/types";
 import { useCommandMenu } from "@cli/components/command-menu/use-command-menu";
 import { StatusBar } from "@cli/components/status-bar";
-import type { KeyBinding, TextareaRenderable } from "@opentui/core";
-import { useCallback, useRef } from "react";
+import type { EditorTraits, KeyBinding, TextareaRenderable } from "@opentui/core";
+import { useCallback, useEffect, useRef } from "react";
 
 type Props = {
 	onSubmit: (value: string) => void;
@@ -31,10 +31,34 @@ export function InputBar({ onSubmit, commandContext, disabled }: Props) {
 		setSelectedCommandIndex,
 	} = useCommandMenu();
 
+	useEffect(() => {
+		if (!textareaRef.current) return;
+
+		textareaRef.current.traits = {
+			capture: ["escape", "submit", "tab"],
+			status: showCommandMenu ? "Command palette" : "Composing",
+		} satisfies EditorTraits;
+
+		return () => {
+			if (textareaRef.current) textareaRef.current.traits = {};
+		};
+	}, [showCommandMenu]);
+
 	const handleExecute = useCallback(
 		async (index: number) => {
 			const command = resolveCommand(index);
-			if (command?.action) {
+			if (!command) return;
+
+			if (command.inputTemplate) {
+				textareaRef.current?.setText(command.inputTemplate);
+				if (textareaRef.current) {
+					textareaRef.current.cursorOffset = command.inputTemplate.length;
+					textareaRef.current.focus();
+				}
+				return;
+			}
+
+			if (command.action) {
 				await command.action(commandContext);
 				textareaRef.current?.clear();
 			}
@@ -90,6 +114,7 @@ export function InputBar({ onSubmit, commandContext, disabled }: Props) {
 						placeholder="what would you like to do? (/ for commands)"
 						placeholderColor="#585b70"
 						textColor="#cdd6f4"
+						wrapMode="word"
 						keyBindings={TEXT_AREA_KEYBINDINGS}
 						onContentChange={handleTextareaContentChange}
 						onSubmit={handleTextareaSubmit}

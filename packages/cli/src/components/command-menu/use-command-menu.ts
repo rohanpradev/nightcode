@@ -29,7 +29,7 @@ export function useCommandMenu(): UseCommandMenuReturn {
 	);
 
 	const handleContentChange = useCallback((value: string) => {
-		const shouldShow = value.startsWith("/");
+		const shouldShow = /^\/[^\s]*$/.test(value);
 		setTextValue(value);
 		setShowCommandMenu(shouldShow);
 		if (shouldShow) {
@@ -51,6 +51,15 @@ export function useCommandMenu(): UseCommandMenuReturn {
 		[filteredCommands],
 	);
 
+	const scrollCommandIntoView = useCallback(
+		(index: number) => {
+			const command = filteredCommands[index];
+			if (!command) return;
+			scrollRef.current?.scrollChildIntoView(`command-${command.name}`);
+		},
+		[filteredCommands],
+	);
+
 	useKeyboard((key) => {
 		if (!showCommandMenu || filteredCommands.length === 0) return;
 
@@ -64,7 +73,7 @@ export function useCommandMenu(): UseCommandMenuReturn {
 			key.preventDefault();
 			const nextIndex = (selectedCommandIndex + 1) % filteredCommands.length;
 			setSelectedCommandIndex(nextIndex);
-			scrollRef.current?.scrollTo(nextIndex);
+			scrollCommandIntoView(nextIndex);
 			return;
 		}
 
@@ -73,7 +82,7 @@ export function useCommandMenu(): UseCommandMenuReturn {
 			const nextIndex =
 				selectedCommandIndex === 0 ? filteredCommands.length - 1 : selectedCommandIndex - 1;
 			setSelectedCommandIndex(nextIndex);
-			scrollRef.current?.scrollTo(nextIndex);
+			scrollCommandIntoView(nextIndex);
 		}
 	});
 

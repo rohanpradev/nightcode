@@ -4,24 +4,28 @@
 	"private": true,
 	"exports": {
 		".": "./src/index.ts",
+		"./lib/agent-profiles": "./src/lib/agent-profiles.ts",
 		"./lib/context-engine": "./src/lib/context-engine.ts",
+		"./lib/lsp-config": "./src/lib/lsp-config.ts",
+		"./lib/skills": "./src/lib/skills.ts",
 		"./services/llm": "./src/services/llm.ts"
 	},
 	"scripts": {
 		"dev": "bun run --hot src/index.ts",
-		"build": "bun build src/index.ts --outdir dist --target bun --minify --sourcemap=external"
+		"build": "bun build src/index.ts --outdir dist --target bun --minify --sourcemap=external",
+		"test": "bun test src"
 	},
 	"dependencies": {
-		"@ai-sdk/anthropic": "4.0.0-canary.59",
-		"@ai-sdk/azure": "4.0.0-canary.63",
-		"@ai-sdk/openai": "4.0.0-canary.63",
+		"@ai-sdk/anthropic": "4.0.5",
+		"@ai-sdk/azure": "4.0.5",
+		"@ai-sdk/openai": "4.0.5",
 		"@hono/zod-validator": "^0.8.0",
 		"@nightcode/database": "workspace:*",
 		"@nightcode/shared": "workspace:*",
-		"ai": "7.0.0-canary.152",
+		"ai": "7.0.11",
 		"dotenv": "^17.4.2",
 		"drizzle-orm": "^0.45.2",
-		"hono": "^4.12.22",
+		"hono": "^4.12.27",
 		"zod": "^4.4.3"
 	}
 }

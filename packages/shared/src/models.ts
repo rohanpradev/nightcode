@@ -6,7 +6,8 @@ export interface SupportedChatModel {
 	label: string;
 	contextWindow: number;
 	maxOutputTokens: number;
-	pricing: {
+	defaultForProvider?: boolean;
+	pricing?: {
 		inputUsdPerMillionTokens: number;
 		cachedInputUsdPerMillionTokens?: number;
 		outputUsdPerMillionTokens: number;
@@ -14,6 +15,35 @@ export interface SupportedChatModel {
 }
 
 export const supportedChatModels = [
+	{
+		id: "gpt-5.5",
+		provider: "openai",
+		label: "GPT-5.5",
+		contextWindow: 400_000,
+		maxOutputTokens: 128_000,
+		defaultForProvider: true,
+	},
+	{
+		id: "gpt-5.5-2026-04-23",
+		provider: "openai",
+		label: "GPT-5.5 (2026-04-23)",
+		contextWindow: 400_000,
+		maxOutputTokens: 128_000,
+	},
+	{
+		id: "gpt-5.4",
+		provider: "openai",
+		label: "GPT-5.4",
+		contextWindow: 400_000,
+		maxOutputTokens: 128_000,
+	},
+	{
+		id: "gpt-5.3-codex",
+		provider: "openai",
+		label: "GPT-5.3 Codex",
+		contextWindow: 400_000,
+		maxOutputTokens: 128_000,
+	},
 	{
 		id: "gpt-5.2",
 		provider: "openai",
@@ -74,6 +104,42 @@ export const supportedChatModels = [
 			outputUsdPerMillionTokens: 8,
 		},
 	},
+	{
+		id: "claude-opus-4-7",
+		provider: "anthropic",
+		label: "Claude Opus 4.7",
+		contextWindow: 200_000,
+		maxOutputTokens: 32_000,
+	},
+	{
+		id: "claude-opus-4-6",
+		provider: "anthropic",
+		label: "Claude Opus 4.6",
+		contextWindow: 200_000,
+		maxOutputTokens: 32_000,
+	},
+	{
+		id: "claude-sonnet-4-6",
+		provider: "anthropic",
+		label: "Claude Sonnet 4.6",
+		contextWindow: 200_000,
+		maxOutputTokens: 32_000,
+		defaultForProvider: true,
+	},
+	{
+		id: "claude-sonnet-4-5",
+		provider: "anthropic",
+		label: "Claude Sonnet 4.5",
+		contextWindow: 200_000,
+		maxOutputTokens: 32_000,
+	},
+	{
+		id: "claude-haiku-4-5",
+		provider: "anthropic",
+		label: "Claude Haiku 4.5",
+		contextWindow: 200_000,
+		maxOutputTokens: 32_000,
+	},
 ] satisfies SupportedChatModel[];
 
 export function findSupportedChatModel(modelId: string): SupportedChatModel | undefined {
@@ -82,6 +148,13 @@ export function findSupportedChatModel(modelId: string): SupportedChatModel | un
 
 export function getProviderForModel(modelId: string): SupportedProvider | undefined {
 	return findSupportedChatModel(modelId)?.provider;
+}
+
+export function getDefaultModelForProvider(provider: SupportedProvider): string | undefined {
+	return (
+		supportedChatModels.find((model) => model.provider === provider && model.defaultForProvider)
+			?.id ?? supportedChatModels.find((model) => model.provider === provider)?.id
+	);
 }
 
 export type { SupportedProvider };

@@ -11,7 +11,7 @@
 		"build": "bun build src/index.ts --outdir dist --target bun --minify --sourcemap=external"
 	},
 	"dependencies": {
-		"ai": "7.0.0-canary.152",
+		"ai": "7.0.11",
 		"zod": "^4.4.3"
 	}
 }

@@ -9,7 +9,7 @@ export const llmMessageSchema = z.object({
 
 export const llmConfigSchema = z.object({
 	provider: supportedProviderSchema.default("openai"),
-	model: z.string().default("gpt-5.2"),
+	model: z.string().default("gpt-5.5"),
 	maxTokens: z.number().int().positive().default(8192),
 	temperature: z.number().min(0).max(2).default(0.2),
 	systemPrompt: z.string().optional(),
@@ -39,6 +39,10 @@ export const llmStreamChunkSchema = z.discriminatedUnion("type", [
 			name: z.string(),
 			result: z.string(),
 		}),
+	}),
+	z.object({
+		type: z.literal("error"),
+		error: z.string(),
 	}),
 	z.object({
 		type: z.literal("done"),

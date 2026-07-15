@@ -9,10 +9,11 @@
 	},
 	"scripts": {
 		"build": "bun build src/index.ts --outdir dist --target bun --minify --sourcemap=external",
-		"db:generate": "bun node_modules/drizzle-kit/bin.cjs generate",
-		"db:push": "bun node_modules/drizzle-kit/bin.cjs push",
-		"db:studio": "bun node_modules/drizzle-kit/bin.cjs studio",
-		"db:migrate": "bun node_modules/drizzle-kit/bin.cjs migrate"
+		"typecheck": "bunx --no-install --bun tsc --noEmit --checkers 8 -p tsconfig.json",
+		"db:generate": "bunx --no-install --bun drizzle-kit generate",
+		"db:push": "bunx --no-install --bun drizzle-kit push",
+		"db:studio": "bunx --no-install --bun drizzle-kit studio",
+		"db:migrate": "bunx --no-install --bun drizzle-kit migrate"
 	},
 	"dependencies": {
 		"drizzle-orm": "^0.45.2"

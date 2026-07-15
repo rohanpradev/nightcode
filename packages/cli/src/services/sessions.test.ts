@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { mkdir, mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -97,13 +97,14 @@ describe("stored sessions", () => {
 		await expect(listStoredSessions()).resolves.toMatchObject([{ id: "valid-session" }]);
 	});
 
-	it("writes the final sessions file without leaving temp files behind", async () => {
+	it("persists sessions in SQLite without leaving temporary files behind", async () => {
 		await saveStoredSession(session({ id: "persisted-session" }));
 
 		const entries = await readdir(join(nightcodeHome(), ".nightcode"));
-		expect(entries).toEqual(["sessions.json"]);
-
-		const stored = JSON.parse(await readFile(sessionStorePath(), "utf8")) as Array<{ id: string }>;
-		expect(stored).toMatchObject([{ id: "persisted-session" }]);
+		expect(entries).toContain("nightcode.db");
+		expect(entries.some((entry) => entry.endsWith(".tmp"))).toBe(false);
+		await expect(loadStoredSession("persisted-session")).resolves.toMatchObject({
+			id: "persisted-session",
+		});
 	});
 });

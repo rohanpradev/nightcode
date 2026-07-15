@@ -1,5 +1,6 @@
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { readFile } from "node:fs/promises";
+import { join, resolve } from "node:path";
+import { createNightcodeDatabase } from "@nightcode/database";
 import { type LLMMessage, llmMessageSchema } from "@nightcode/shared";
 import { z } from "zod";
 
@@ -18,6 +19,16 @@ const storedSessionSchema = z.object({
 	fileContext: z.array(sessionFileContextEntrySchema).default([]),
 });
 
+const sessionRowSchema = z.object({
+	id: z.string(),
+	title: z.string(),
+	workspace: z.string(),
+	createdAt: z.number(),
+	updatedAt: z.number(),
+	messages: z.string(),
+	fileContext: z.string(),
+});
+
 export type SessionFileContext = z.infer<typeof storedSessionSchema>["fileContext"];
 export type StoredSession = z.infer<typeof storedSessionSchema>;
 
@@ -28,7 +39,7 @@ function homeDir(): string {
 	return process.env.HOME ?? process.env.USERPROFILE ?? process.cwd();
 }
 
-function sessionFilePath(): string {
+function legacySessionFilePath(): string {
 	return join(homeDir(), ".nightcode", "sessions.json");
 }
 
@@ -43,11 +54,28 @@ function samePath(left: string, right: string): boolean {
 
 function parseStoredSessions(value: unknown): StoredSession[] {
 	if (!Array.isArray(value)) return [];
-
 	return value.flatMap((entry) => {
 		const result = storedSessionSchema.safeParse(entry);
 		return result.success ? [result.data] : [];
 	});
+}
+
+function parseSessionRow(value: unknown): StoredSession | null {
+	const row = sessionRowSchema.safeParse(value);
+	if (!row.success) return null;
+	try {
+		return storedSessionSchema.parse({
+			id: row.data.id,
+			title: row.data.title,
+			cwd: row.data.workspace,
+			createdAt: row.data.createdAt,
+			updatedAt: row.data.updatedAt,
+			messages: JSON.parse(row.data.messages),
+			fileContext: JSON.parse(row.data.fileContext),
+		});
+	} catch {
+		return null;
+	}
 }
 
 export function createSessionId(): string {
@@ -60,25 +88,69 @@ export function createSessionId(): string {
 export function titleFromMessages(messages: LLMMessage[]): string {
 	const firstUserMessage = messages.find((message) => message.role === "user")?.content;
 	if (!firstUserMessage) return "Untitled session";
-
 	return firstUserMessage.replace(/\s+/g, " ").trim().slice(0, 80) || "Untitled session";
 }
 
-async function readSessions(): Promise<StoredSession[]> {
+async function withSessionDatabase<T>(
+	operation: (sqlite: ReturnType<typeof createNightcodeDatabase>["sqlite"]) => T,
+): Promise<T> {
+	const database = createNightcodeDatabase(join(homeDir(), ".nightcode", "nightcode.db"));
 	try {
-		const parsed = JSON.parse(await readFile(sessionFilePath(), "utf8"));
-		return parseStoredSessions(parsed);
-	} catch {
-		return [];
+		await importLegacySessions(database.sqlite);
+		return operation(database.sqlite);
+	} finally {
+		database.close();
 	}
 }
 
-async function writeSessions(sessions: StoredSession[]): Promise<void> {
-	const target = sessionFilePath();
-	await mkdir(dirname(target), { recursive: true });
-	const temp = `${target}.${process.pid}.${Date.now()}.tmp`;
-	await writeFile(temp, `${JSON.stringify(sessions, null, 2)}\n`);
-	await rename(temp, target);
+async function importLegacySessions(
+	sqlite: ReturnType<typeof createNightcodeDatabase>["sqlite"],
+): Promise<void> {
+	const marker = sqlite
+		.query("SELECT value FROM metadata WHERE key = 'legacy_sessions_imported'")
+		.get() as { value: string } | null;
+	if (marker) return;
+
+	let sessions: StoredSession[] = [];
+	try {
+		sessions = parseStoredSessions(JSON.parse(await readFile(legacySessionFilePath(), "utf8")));
+	} catch {}
+
+	const insert = sqlite.prepare(`
+		INSERT INTO sessions (id, workspace, title, createdAt, updatedAt, messages, fileContext, version)
+		VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+		ON CONFLICT(id) DO NOTHING
+	`);
+	const migrate = sqlite.transaction(() => {
+		for (const session of sessions) {
+			insert.run(
+				session.id,
+				resolve(session.cwd),
+				session.title,
+				session.createdAt,
+				session.updatedAt,
+				JSON.stringify(session.messages),
+				JSON.stringify(session.fileContext),
+			);
+		}
+		sqlite.run(
+			"INSERT OR REPLACE INTO metadata (key, value) VALUES ('legacy_sessions_imported', ?)",
+			[String(Date.now())],
+		);
+	});
+	migrate();
+}
+
+function readAllSessions(
+	sqlite: ReturnType<typeof createNightcodeDatabase>["sqlite"],
+): StoredSession[] {
+	const rows = sqlite
+		.query("SELECT id, title, workspace, createdAt, updatedAt, messages, fileContext FROM sessions")
+		.all();
+	return rows.flatMap((row) => {
+		const parsed = parseSessionRow(row);
+		return parsed ? [parsed] : [];
+	});
 }
 
 export type ListStoredSessionsOptions = {
@@ -91,21 +163,23 @@ export async function listStoredSessions(
 ): Promise<StoredSession[]> {
 	const limit = typeof options === "number" ? options : (options.limit ?? 20);
 	const cwd = typeof options === "number" ? undefined : options.cwd;
-	const sessions = await readSessions();
-	const filtered = cwd ? sessions.filter((session) => samePath(session.cwd, cwd)) : sessions;
-	return filtered.sort((a, b) => b.updatedAt - a.updatedAt).slice(0, limit);
+	return withSessionDatabase((sqlite) => {
+		const sessions = readAllSessions(sqlite);
+		const filtered = cwd ? sessions.filter((session) => samePath(session.cwd, cwd)) : sessions;
+		return filtered.sort((left, right) => right.updatedAt - left.updatedAt).slice(0, limit);
+	});
 }
 
 export async function loadStoredSession(id: string): Promise<StoredSession | null> {
 	const normalizedId = id.trim();
 	if (!normalizedId) return null;
-
-	const sessions = await readSessions();
-	const exact = sessions.find((session) => session.id === normalizedId);
-	if (exact) return exact;
-
-	const prefixMatches = sessions.filter((session) => session.id.startsWith(normalizedId));
-	return prefixMatches.length === 1 ? (prefixMatches[0] ?? null) : null;
+	return withSessionDatabase((sqlite) => {
+		const sessions = readAllSessions(sqlite);
+		const exact = sessions.find((session) => session.id === normalizedId);
+		if (exact) return exact;
+		const prefixMatches = sessions.filter((session) => session.id.startsWith(normalizedId));
+		return prefixMatches.length === 1 ? (prefixMatches[0] ?? null) : null;
+	});
 }
 
 export async function loadLatestStoredSession(cwd?: string): Promise<StoredSession | null> {
@@ -114,11 +188,31 @@ export async function loadLatestStoredSession(cwd?: string): Promise<StoredSessi
 }
 
 export async function saveStoredSession(session: StoredSession): Promise<void> {
-	const sessions = await readSessions();
-	const normalizedSession = storedSessionSchema.parse({ ...session, cwd: resolve(session.cwd) });
-	const filtered = sessions.filter((candidate) => candidate.id !== normalizedSession.id);
-	const next = [normalizedSession, ...filtered]
-		.sort((a, b) => b.updatedAt - a.updatedAt)
-		.slice(0, SESSION_LIMIT);
-	await writeSessions(next);
+	const normalized = storedSessionSchema.parse({ ...session, cwd: resolve(session.cwd) });
+	await withSessionDatabase((sqlite) => {
+		sqlite.run(
+			`INSERT INTO sessions (id, workspace, title, createdAt, updatedAt, messages, fileContext, version)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+			 ON CONFLICT(id) DO UPDATE SET
+				workspace = excluded.workspace,
+				title = excluded.title,
+				updatedAt = excluded.updatedAt,
+				messages = excluded.messages,
+				fileContext = excluded.fileContext,
+				version = excluded.version`,
+			[
+				normalized.id,
+				normalized.cwd,
+				normalized.title,
+				normalized.createdAt,
+				normalized.updatedAt,
+				JSON.stringify(normalized.messages),
+				JSON.stringify(normalized.fileContext),
+			],
+		);
+		sqlite.run(
+			"DELETE FROM sessions WHERE id NOT IN (SELECT id FROM sessions ORDER BY updatedAt DESC LIMIT ?)",
+			[SESSION_LIMIT],
+		);
+	});
 }

@@ -1,3 +1,4 @@
+import { resolve } from "node:path";
 import { estimateTokens } from "./cache";
 import { logger } from "./logger";
 
@@ -32,12 +33,29 @@ export interface ContextConfig {
 }
 
 // Repomap: Fast Symbol Index
-const symbolIndex = new Map<string, CodeSymbol[]>();
-const fileModTimes = new Map<string, number>();
+type RepositoryState = {
+	symbolIndex: Map<string, CodeSymbol[]>;
+	fileModTimes: Map<string, number>;
+};
 
-export function clearRepositoryIndex(): void {
-	symbolIndex.clear();
-	fileModTimes.clear();
+const repositoryStates = new Map<string, RepositoryState>();
+
+function repositoryKey(root = process.cwd()): string {
+	const key = resolve(root);
+	return process.platform === "win32" ? key.toLowerCase() : key;
+}
+
+function repositoryState(root = process.cwd()): RepositoryState {
+	const key = repositoryKey(root);
+	const existing = repositoryStates.get(key);
+	if (existing) return existing;
+	const created = { symbolIndex: new Map(), fileModTimes: new Map() };
+	repositoryStates.set(key, created);
+	return created;
+}
+
+export function clearRepositoryIndex(root = process.cwd()): void {
+	repositoryStates.delete(repositoryKey(root));
 }
 
 /** Extract symbols from TypeScript/JavaScript using regex (fast, no tree-sitter needed) */
@@ -177,16 +195,21 @@ function findStatementEnd(lines: string[], startIdx: number): number {
 }
 
 /** Index a file's symbols */
-export async function indexFile(filePath: string): Promise<CodeSymbol[]> {
+export async function indexFile(filePath: string, root = process.cwd()): Promise<CodeSymbol[]> {
 	try {
 		const file = Bun.file(filePath);
-		if (!(await file.exists())) return [];
+		const state = repositoryState(root);
+		if (!(await file.exists())) {
+			state.symbolIndex.delete(filePath);
+			state.fileModTimes.delete(filePath);
+			return [];
+		}
 
 		const content = await file.text();
 		const symbols = extractSymbols(content, filePath);
 
-		symbolIndex.set(filePath, symbols);
-		fileModTimes.set(filePath, Date.now());
+		state.symbolIndex.set(filePath, symbols);
+		state.fileModTimes.set(filePath, file.lastModified);
 
 		return symbols;
 	} catch {
@@ -196,6 +219,7 @@ export async function indexFile(filePath: string): Promise<CodeSymbol[]> {
 
 /** Index entire directory */
 export async function indexDirectory(dirPath: string): Promise<number> {
+	clearRepositoryIndex(dirPath);
 	const glob = new Bun.Glob("**/*.{ts,tsx,js,jsx,mjs,cts}");
 	const excluded = new Set(["node_modules", ".git", "dist", ".next", "coverage", ".bun", ".cache"]);
 
@@ -206,29 +230,33 @@ export async function indexDirectory(dirPath: string): Promise<number> {
 
 		if (parts.some((p) => excluded.has(p))) continue;
 
-		await indexFile(`${dirPath}/${file}`);
+		await indexFile(resolve(dirPath, file), dirPath);
 		indexed++;
 	}
 
-	logger.info(`Indexed ${indexed} files, ${getSymbolCount()} symbols (dir: ${dirPath})`);
+	logger.info(`Indexed ${indexed} files, ${getSymbolCount(dirPath)} symbols (dir: ${dirPath})`);
 
 	return indexed;
 }
 
-export function getSymbolCount(): number {
+export function getSymbolCount(root = process.cwd()): number {
 	let count = 0;
-	for (const symbols of symbolIndex.values()) {
+	for (const symbols of repositoryState(root).symbolIndex.values()) {
 		count += symbols.length;
 	}
 	return count;
 }
 
 /** Find symbols by name (fuzzy) */
-export function findSymbols(query: string, kind?: CodeSymbol["kind"]): CodeSymbol[] {
+export function findSymbols(
+	query: string,
+	kind?: CodeSymbol["kind"],
+	root = process.cwd(),
+): CodeSymbol[] {
 	const results: CodeSymbol[] = [];
 	const lower = query.toLowerCase();
 
-	for (const symbols of symbolIndex.values()) {
+	for (const symbols of repositoryState(root).symbolIndex.values()) {
 		for (const sym of symbols) {
 			if (kind && sym.kind !== kind) continue;
 			if (sym.name.toLowerCase().includes(lower)) {
@@ -257,6 +285,7 @@ function scoreFileRelevance(
 	filePath: string,
 	query: string,
 	symbols: CodeSymbol[],
+	fileModTimes: Map<string, number>,
 ): { score: number; reason: string } {
 	let score = 0;
 	const reasons: string[] = [];
@@ -332,6 +361,7 @@ export async function assembleContext(
 	const timer = logger.startTimer("context-assembly");
 	const results: FileContext[] = [];
 	let tokensUsed = 0;
+	const state = repositoryState(config.cwd);
 
 	// 1. Always include pinned files first
 	for (const pinnedPath of config.pinnedFiles) {
@@ -357,10 +387,10 @@ export async function assembleContext(
 	// 2. Score all indexed files
 	const candidates: Array<{ path: string; score: number; reason: string }> = [];
 
-	for (const [filePath, symbols] of symbolIndex) {
+	for (const [filePath, symbols] of state.symbolIndex) {
 		if (config.pinnedFiles.includes(filePath)) continue;
 
-		const { score, reason } = scoreFileRelevance(filePath, query, symbols);
+		const { score, reason } = scoreFileRelevance(filePath, query, symbols, state.fileModTimes);
 
 		if (score >= config.minRelevance) {
 			candidates.push({ path: filePath, score, reason });
@@ -417,14 +447,15 @@ export async function assembleContext(
 }
 
 /** Generate a repomap summary (like Aider) - concise file/symbol listing */
-export function generateRepomap(maxTokens = 4000): string {
+export function generateRepomap(maxTokens = 4000, root = process.cwd()): string {
 	const lines: string[] = ["# Repository Map\n"];
 	let tokens = 50;
+	const state = repositoryState(root);
 
 	// Sort files by recency
-	const files = [...symbolIndex.entries()].sort((a, b) => {
-		const aTime = fileModTimes.get(a[0]) ?? 0;
-		const bTime = fileModTimes.get(b[0]) ?? 0;
+	const files = [...state.symbolIndex.entries()].sort((a, b) => {
+		const aTime = state.fileModTimes.get(a[0]) ?? 0;
+		const bTime = state.fileModTimes.get(b[0]) ?? 0;
 		return bTime - aTime;
 	});
 
@@ -465,25 +496,18 @@ export function compactMessages(
 	const toSummarize = messages.slice(0, messages.length - keepLast);
 	const toKeep = messages.slice(messages.length - keepLast);
 
-	// Build a compact summary of older messages
-	const summaryParts: string[] = [];
-	let tokens = 0;
-
-	for (const msg of toSummarize) {
-		if (tokens >= maxSummaryTokens) break;
-
-		const brief =
-			msg.role === "user"
-				? `User: ${msg.content.slice(0, 100)}`
-				: `Assistant: ${msg.content.slice(0, 200)}`;
-
-		summaryParts.push(brief);
-		tokens += estimateTokens(brief);
-	}
-
+	const omittedTokens = toSummarize.reduce(
+		(total, message) => total + estimateTokens(message.content),
+		0,
+	);
 	const summary = {
-		role: "system" as const,
-		content: `[Previous conversation summary (${toSummarize.length} messages)]\n${summaryParts.join("\n")}`,
+		role: "user" as const,
+		content: [
+			"<context-note>",
+			`${toSummarize.length} earlier messages (${Math.min(omittedTokens, maxSummaryTokens).toLocaleString()}+ estimated tokens) were omitted by local compact mode.`,
+			"Do not infer their exact contents. Re-read repository state or ask the user when missing details matter.",
+			"</context-note>",
+		].join("\n"),
 	};
 
 	return [summary, ...toKeep];

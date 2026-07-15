@@ -139,7 +139,7 @@ export const COMMANDS: CommandItem[] = [
 	},
 	{
 		name: "doctor",
-		description: "Check system health: API keys, connectivity, tools",
+		description: "Check provider configuration and agent-tool availability",
 		value: "/doctor",
 		action: ({ doctor }) => doctor(),
 	},
@@ -190,16 +190,42 @@ export const COMMANDS: CommandItem[] = [
 	},
 	{
 		name: "vim",
-		description: "Toggle vim keybindings for the input",
+		description: "Toggle Vim insert/normal mode for the input",
 		value: "/vim",
 		action: ({ toggleVim }) => toggleVim(),
 	},
 	{
 		name: "undo",
-		description: "Show safe undo options for the current repository",
+		description: "Restore the most recent Night Code patch checkpoint",
 		value: "/undo",
 		shortcut: "Ctrl+Z",
 		action: ({ undoLastChange }) => undoLastChange(),
+	},
+	{
+		name: "approvals",
+		description: "Show tool actions waiting for your decision",
+		value: "/approvals",
+		action: ({ showApprovals }) => showApprovals(),
+	},
+	{
+		name: "approve",
+		description: "Approve a pending tool action",
+		value: "/approve",
+		inputTemplate: "/approve ",
+		action: ({ showCommandUsage }) => showCommandUsage("/approve <approval-id>"),
+	},
+	{
+		name: "deny",
+		description: "Deny a pending tool action",
+		value: "/deny",
+		inputTemplate: "/deny ",
+		action: ({ showCommandUsage }) => showCommandUsage("/deny <approval-id>"),
+	},
+	{
+		name: "stop",
+		description: "Cancel the active model or tool run",
+		value: "/stop",
+		action: ({ submitPrompt }) => submitPrompt("/stop"),
 	},
 	{
 		name: "stats",

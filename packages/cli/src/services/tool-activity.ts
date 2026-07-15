@@ -14,7 +14,10 @@ export function formatToolArgs(activity: ToolActivity): string {
 			return String(args.command ?? "").slice(0, 50);
 		case "readFile":
 		case "writeFile":
-			return String(args.path ?? "");
+		case "applyPatch":
+			return Array.isArray(args.operations)
+				? `${args.operations.length} operation(s)`
+				: String(args.path ?? "");
 		case "editFile":
 			return String(args.path ?? "");
 		case "multiEdit":
@@ -41,6 +44,8 @@ export function formatToolArgs(activity: ToolActivity): string {
 			return "available skills";
 		case "listLspServers":
 			return "configured LSP";
+		case "undoLastPatch":
+			return "last Night Code checkpoint";
 		default:
 			return JSON.stringify(args).slice(0, 40);
 	}

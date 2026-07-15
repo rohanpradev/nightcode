@@ -1,7 +1,11 @@
 import { llm } from "@cli/services/llm";
 import { TextAttributes } from "@opentui/core";
 
-export function StatusBar() {
+type Props = {
+	vimInputMode?: "insert" | "normal";
+};
+
+export function StatusBar({ vimInputMode }: Props) {
 	const { provider, model, agentMode } = llm.config;
 
 	return (
@@ -20,6 +24,11 @@ export function StatusBar() {
 			</box>
 
 			<box flexDirection="row" gap={1} flexShrink={1} overflow="hidden">
+				{vimInputMode && (
+					<text fg={vimInputMode === "normal" ? "#f9e2af" : "#a6e3a1"}>
+						{`vim:${vimInputMode}`}
+					</text>
+				)}
 				<text fg="#45475a" attributes={TextAttributes.DIM}>
 					{"/cmds"}
 				</text>

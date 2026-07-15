@@ -1,4 +1,7 @@
 import { describe, expect, it } from "bun:test";
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import app from "./index";
 
 describe("server routes", () => {
@@ -42,5 +45,53 @@ describe("server routes", () => {
 		});
 
 		expect(response.status).toBe(400);
+	});
+
+	it("rejects request-selected workspaces outside configured server roots", async () => {
+		const outside = await mkdtemp(join(tmpdir(), "nightcode-server-outside-"));
+		const response = await app.request("/chat", {
+			method: "POST",
+			body: JSON.stringify({
+				messages: [{ role: "user", content: "hello" }],
+				workspace: outside,
+			}),
+			headers: new Headers({ "Content-Type": "application/json" }),
+		});
+
+		expect(response.status).toBe(403);
+		expect(await response.json()).toMatchObject({ code: "WORKSPACE_NOT_ALLOWED" });
+	});
+
+	it("pins an API session to its original workspace", async () => {
+		const sessionId = crypto.randomUUID();
+		const create = await app.request("/approvals", {
+			method: "POST",
+			body: JSON.stringify({
+				sessionId,
+				workspace: process.cwd(),
+				decision: { approvalId: "missing", approved: false },
+			}),
+			headers: new Headers({ "Content-Type": "application/json" }),
+		});
+		expect(create.status).toBe(200);
+		await create.text();
+
+		const mismatch = await app.request("/chat", {
+			method: "POST",
+			body: JSON.stringify({
+				sessionId,
+				workspace: resolve("packages", "server"),
+				messages: [{ role: "user", content: "hello" }],
+			}),
+			headers: new Headers({ "Content-Type": "application/json" }),
+		});
+		expect(mismatch.status).toBe(409);
+		expect(await mismatch.json()).toMatchObject({ code: "SESSION_WORKSPACE_MISMATCH" });
+	});
+
+	it("returns structured state for unknown session approvals", async () => {
+		const response = await app.request(`/sessions/${crypto.randomUUID()}/approvals`);
+		expect(response.status).toBe(404);
+		expect(await response.json()).toMatchObject({ code: "SESSION_NOT_FOUND" });
 	});
 });

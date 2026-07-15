@@ -17,10 +17,14 @@ export const sessions = sqliteTable(
 			.$defaultFn(() => new Date())
 			.$onUpdateFn(() => new Date()),
 		messages: text().notNull().default("[]"),
+		workspace: text().notNull().default(""),
+		fileContext: text().notNull().default("[]"),
+		version: integer().notNull().default(1),
 	},
 	(table) => [
 		index("sessions_userId_idx").on(table.userId),
 		index("sessions_createdAt_idx").on(table.createdAt),
+		index("sessions_workspace_idx").on(table.workspace),
 	],
 );
 

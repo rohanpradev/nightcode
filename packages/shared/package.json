@@ -8,7 +8,8 @@
 		"./schemas": "./src/schemas.ts"
 	},
 	"scripts": {
-		"build": "bun build src/index.ts --outdir dist --target bun --minify --sourcemap=external"
+		"build": "bun build src/index.ts --outdir dist --target bun --minify --sourcemap=external",
+		"typecheck": "bunx --no-install --bun tsc --noEmit --checkers 8 -p tsconfig.json"
 	},
 	"dependencies": {
 		"ai": "7.0.11",

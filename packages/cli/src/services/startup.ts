@@ -242,7 +242,14 @@ function providerEnvStatus(): Record<string, boolean> {
 }
 
 export async function runDoctor(initialWorkspace: InitialWorkspace): Promise<void> {
-	const sessions = await listStoredSessions({ cwd: initialWorkspace.root, limit: 100 });
+	let savedSessionsForWorkspace: number | null = null;
+	let sessionStorageError: string | null = null;
+	try {
+		const sessions = await listStoredSessions({ cwd: initialWorkspace.root, limit: 100 });
+		savedSessionsForWorkspace = sessions.length;
+	} catch (error) {
+		sessionStorageError = error instanceof Error ? error.message : String(error);
+	}
 	const report = {
 		command: "nightcode",
 		executable: Bun.argv[1] ?? null,
@@ -254,7 +261,8 @@ export async function runDoctor(initialWorkspace: InitialWorkspace): Promise<voi
 		provider: llm.config.provider,
 		model: llm.config.model,
 		agentMode: llm.config.agentMode,
-		savedSessionsForWorkspace: sessions.length,
+		savedSessionsForWorkspace,
+		sessionStorageError,
 		providerEnv: providerEnvStatus(),
 	};
 
@@ -272,7 +280,9 @@ export async function runDoctor(initialWorkspace: InitialWorkspace): Promise<voi
 		`Provider: ${report.provider}`,
 		`Model: ${report.model}`,
 		`Agent mode: ${report.agentMode ? "on" : "off"}`,
-		`Saved sessions: ${report.savedSessionsForWorkspace}`,
+		report.sessionStorageError
+			? `Session storage: unavailable (${report.sessionStorageError})`
+			: `Saved sessions: ${report.savedSessionsForWorkspace ?? 0}`,
 		report.serverUrl ? `Server URL: ${report.serverUrl}` : null,
 		report.workspaceWarning ? `Warning: ${report.workspaceWarning}` : null,
 		"Provider env:",

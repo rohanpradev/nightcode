@@ -68,12 +68,17 @@ describe("project config loader", () => {
 				command: "bun",
 				args: ["run", "mcp"],
 				env: { FOO: "bar" },
+				requireApproval: true,
 			},
 		});
 
 		const invalidRoot = await createProject({
 			"mcp.json": JSON.stringify({ local: { transport: "bogus" } }),
 		});
-		expect(loadProjectConfig(invalidRoot).mcpServers).toBeNull();
+		const invalid = loadProjectConfig(invalidRoot);
+		expect(invalid.mcpServers).toBeNull();
+		expect(invalid.diagnostics).toHaveLength(1);
+		expect(invalid.diagnostics[0]).toMatchObject({ severity: "error" });
+		expect(invalid.diagnostics[0]?.file).toMatch(/[\\/]\.nightcode[\\/]mcp\.json$/);
 	});
 });

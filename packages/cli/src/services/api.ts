@@ -1,5 +1,10 @@
 import type { AppType } from "@nightcode/server";
-import { type ChatRequest, type LLMStreamChunk, llmStreamChunkSchema } from "@nightcode/shared";
+import {
+	type ApprovalRequest,
+	type ChatRequest,
+	type LLMStreamChunk,
+	llmStreamChunkSchema,
+} from "@nightcode/shared";
 
 import { hc } from "hono/client";
 
@@ -11,11 +16,33 @@ export const hcWithType = (...args: Parameters<typeof hc>): Client => hc<AppType
 
 export const api = hcWithType(SERVER_URL);
 
-export async function* streamChat(request: ChatRequest): AsyncGenerator<LLMStreamChunk> {
-	const response = await api.chat.$post({ json: request });
+export async function* streamChat(
+	request: ChatRequest,
+	abortSignal?: AbortSignal,
+): AsyncGenerator<LLMStreamChunk> {
+	const response = await api.chat.$post({ json: request }, { init: { signal: abortSignal } });
+	yield* parseEventStream(response);
+}
 
+export async function* resolveRemoteApproval(
+	request: ApprovalRequest,
+	abortSignal?: AbortSignal,
+): AsyncGenerator<LLMStreamChunk> {
+	const response = await api.approvals.$post({ json: request }, { init: { signal: abortSignal } });
+	yield* parseEventStream(response);
+}
+
+async function* parseEventStream(response: {
+	ok: boolean;
+	status: number;
+	body: ReadableStream<Uint8Array> | null;
+	text(): Promise<string>;
+}): AsyncGenerator<LLMStreamChunk> {
 	if (!response.ok || !response.body) {
-		throw new Error(`Nightcode server chat failed: HTTP ${response.status}`);
+		const detail = await response.text().catch(() => "");
+		throw new Error(
+			`Nightcode server request failed: HTTP ${response.status}${detail ? ` — ${detail}` : ""}`,
+		);
 	}
 
 	const reader = response.body.getReader();

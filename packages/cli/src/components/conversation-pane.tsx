@@ -1,5 +1,5 @@
 import { Spinner } from "@cli/components/spinner";
-import type { LLMMessage, LLMProvider } from "@cli/services/llm";
+import type { LLMMessage, LLMProvider, PendingApproval } from "@cli/services/llm";
 import { formatToolArgs, type ToolActivity } from "@cli/services/tool-activity";
 import { type ScrollBoxRenderable, TextAttributes } from "@opentui/core";
 import type { RefObject } from "react";
@@ -10,6 +10,7 @@ type ConversationPaneProps = {
 	isLoading: boolean;
 	streamingText: string;
 	toolActivities: ToolActivity[];
+	pendingApprovals: PendingApproval[];
 	model: string;
 	provider: LLMProvider;
 	agentMode: boolean;
@@ -23,6 +24,7 @@ export function ConversationPane({
 	isLoading,
 	streamingText,
 	toolActivities,
+	pendingApprovals,
 	model,
 	provider,
 	agentMode,
@@ -107,7 +109,7 @@ export function ConversationPane({
 						</box>
 					)}
 
-					{msg.role === "system" && (
+					{(msg.role === "system" || msg.role === "notice") && (
 						<box flexDirection="row" gap={1} paddingLeft={2} overflow="hidden">
 							<text fg="#45475a">{"\u2500"}</text>
 							<text fg="#6c7086" attributes={TextAttributes.DIM}>
@@ -117,6 +119,22 @@ export function ConversationPane({
 					)}
 				</box>
 			))}
+
+			{pendingApprovals.length > 0 && (
+				<box marginLeft={1} paddingLeft={1} border={["left"]} borderColor="#f9e2af" gap={0.5}>
+					<text fg="#f9e2af" attributes={TextAttributes.BOLD}>
+						{`${pendingApprovals.length} action${pendingApprovals.length === 1 ? "" : "s"} need approval`}
+					</text>
+					{pendingApprovals.map((approval) => (
+						<box key={approval.id} gap={0} overflow="hidden">
+							<text fg="#89b4fa">{`${approval.toolName}  ${approval.id}`}</text>
+							<text fg="#6c7086" attributes={TextAttributes.DIM}>
+								{`/approve ${approval.id}   /deny ${approval.id}`}
+							</text>
+						</box>
+					))}
+				</box>
+			)}
 
 			{isLoading && streamingText && (
 				<box

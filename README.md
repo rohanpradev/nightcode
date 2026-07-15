@@ -1,122 +1,121 @@
 # Night Code
 
-Terminal-first AI coding agent built with Bun workspaces, Hono, and Vercel AI SDK v7.
+Night Code is a terminal-first coding-agent harness for Bun and TypeScript. It combines a scoped agent runtime, canonical workspace boundaries, approval-gated tools, transactional patches, durable local sessions, MCP tools, repository context, and a typed streaming API.
 
-![Night Code terminal demo](assets/nightcode-demo.gif)
+The default OpenAI model is `gpt-5.6`. Anthropic and Azure OpenAI are also supported.
 
-## Setup
+## Quick start
 
-Create a `.env` file in the workspace root:
+```powershell
+bun install
+Copy-Item .env.example .env
+bun run dev:cli -- --workspace C:\path\to\project
+```
 
-```bash
+Set at least one provider credential in `.env`:
+
+```dotenv
 OPENAI_API_KEY=sk-...
 NIGHTCODE_PROVIDER=openai
-NIGHTCODE_MODEL=gpt-5.5
-NIGHTCODE_PORT=3000
+NIGHTCODE_MODEL=gpt-5.6
 ```
 
-Optional:
+To run the HTTP service separately:
 
-```bash
-OPENAI_BASE_URL=
-OPENAI_ORG_ID=
-OPENAI_PROJECT_ID=
-ANTHROPIC_API_KEY=
-ANTHROPIC_AUTH_TOKEN=
-ANTHROPIC_BASE_URL=
-AZURE_OPENAI_API_KEY=
-AZURE_OPENAI_RESOURCE_NAME=
-AZURE_OPENAI_BASE_URL=
-AZURE_OPENAI_API_VERSION=
-AZURE_OPENAI_DEPLOYMENT=
-NIGHTCODE_MAX_TOKENS=8192
-NIGHTCODE_TEMPERATURE=0.2
-NIGHTCODE_WORKSPACE=/path/to/project
-NIGHTCODE_ALLOW_DANGEROUS_SHELL=false
-NIGHTCODE_LOG_LEVEL=info
-```
-
-## Commands
-
-```bash
-bun install
+```powershell
 bun run dev:server
-bun run dev:cli
 ```
 
-Run the CLI against another repository while keeping this source checkout as the app runtime:
+## What is implemented
 
-```bash
-bun run dev:cli -- --workspace /path/to/project
-bun run dev:cli -- --cwd /path/to/project
-NIGHTCODE_WORKSPACE=/path/to/project bun run dev:cli
+- One stateful runtime per session and workspace; concurrent runs in one session are rejected.
+- Versioned NDJSON events with run, sequence, step, tool-call, approval, usage, abort, error, and completion metadata.
+- Presentation-only `notice` messages that are persisted by the CLI but never sent to a model.
+- Canonical path authorization that resolves symlinks and junctions before containment checks.
+- Structured, multi-file patching with preflight validation, atomic writes, rollback, SHA-256 preconditions, checkpoints, and conflict-safe undo.
+- Risk-classified shell execution with approval modes, time/output bounds, cancellation, a minimal child environment, and provider-secret stripping.
+- Session/workspace-pinned HTTP routes, bounded runtime retention, cancellation propagation, and structured stream errors.
+- SQLite session storage with WAL, legacy `sessions.json` import, atomic upserts, and a 100-session retention limit.
+- Workspace-isolated, incrementally refreshed repository maps.
+- Validated `.nightcode` configuration with surfaced diagnostics instead of silent fallback.
+- MCP over HTTP or local stdio, namespaced tools, allowlists, redacted inherited environments, and approval by default.
+- TypeScript 7.0.2's production native compiler, AI SDK 7, Biome, Bun tests, and focused harness/security regression suites.
+
+## Agent controls
+
+Useful CLI commands:
+
+- `/plan`, `/fix`, `/review`, `/test` — common engineering workflows.
+- `/workspace <dir>`, `/allow <dir>` — select the primary workspace or explicitly add another root.
+- `/add <file>`, `/context`, `/clear-context`, `/index`, `/map` — manage code context.
+- `/approvals`, `/approve <id>`, `/deny <id>` — inspect and resolve gated tool actions.
+- `/stop` — abort the active model/tool run.
+- `/undo` — restore the last Night Code patch if no later change conflicts.
+- `/sessions`, `/continue`, `/resume <id>` — restore durable local conversations.
+- `/todo`, `/status`, `/stats`, `/cost`, `/doctor` — inspect agent and runtime state.
+
+## Configuration
+
+Project policy lives in `.nightcode/config.yaml`:
+
+```yaml
+model: gpt-5.6
+mode: BUILD
+approvalMode: on-risk
+maxAgentSteps: 20
+maxRetries: 2
+maxToolOutputChars: 60000
+maxToolTimeoutMs: 120000
+contextBudget: 16000
+requirePlanForEdits: true
+allowedPaths: []
+disabledTools: []
 ```
 
-Useful checks:
+See [configuration](docs/configuration.md), [architecture](docs/architecture.md), [security](docs/security.md), and [evaluation](docs/evaluation.md).
 
-```bash
-bun run check
-bun run typecheck
-bun run build
-```
-
-Code quality:
-
-```bash
-bun run format:check
-bun run lint
-bun run check:fix
-```
-
-This project uses Bun workspaces, Biome for formatting/linting, and the TypeScript 7 native preview compiler via `@typescript/native-preview`/`tsgo`.
-
-## Backend
-
-The server exports a fully typed Hono `AppType` from `@nightcode/server`, so the CLI can use `hc<AppType>()` for end-to-end route inference.
-
-Routes:
+## API
 
 - `GET /health`
 - `GET /providers`
 - `GET /models?provider=openai`
-- `GET /models?provider=anthropic`
-- `POST /chat` streams newline-delimited `LLMStreamChunk` JSON
+- `POST /chat`
+- `POST /approvals`
+- `GET /sessions/:sessionId/approvals`
+- `DELETE /sessions/:sessionId`
 - `POST /agents/coding/run`
 
-## CLI workflow
+`POST /chat` and `POST /approvals` stream one validated `LLMStreamChunk` JSON object per line. The response also carries `X-Nightcode-Session-Id`.
 
-Night Code includes slash commands for fast project work:
+The server accepts workspaces only below `NIGHTCODE_SERVER_WORKSPACE_ROOTS` (the process working directory by default). Separate multiple roots with the platform path delimiter.
 
-- `/plan`, `/fix`, `/review`, `/explain`, `/test` for agent workflow presets
-- `/add <file>`, `/context`, `/clear-context` for pinned file context
-- `/workspace <dir>` or `/cwd <dir>` to switch the active repository; this resets agent access, file context, skills, project instructions, and the repository map to the new workspace
-- `/allow <dir>` to grant additional explicit access outside the active workspace
-- `/index`, `/map` for a compact repository symbol map
-- `/models`, `/model <id>`, `/provider <name>`, `/agent`, `/compact` for runtime control
-- `/status`, `/stats`, `/cost`, `/doctor` for telemetry and health checks
-- `/sessions`, `/resume <session-id>` to restore saved sessions, including their original workspace
-- `/todo` to inspect the agent-maintained task plan
-- `/agents` to inspect custom profiles from `.github/agents`, `.nightcode/agents`, or `.agents`
-- `/lsp` to inspect LSP config from `.github/lsp.json`, `.nightcode/lsp.json`, or `~/.copilot/lsp-config.json`
+## Quality gates
 
-Harness config in `.nightcode/config.yaml` can tune agent policy:
-
-```yaml
-maxAgentSteps: 8
-maxRetries: 2
-requirePlanForEdits: true
-allowDangerousShell: false
-disabledTools: []
-allowedPaths: []
+```powershell
+bun run verify
 ```
 
-By default the shell tool blocks destructive command families such as recursive deletion, hard git resets, force git cleans, and disk formatting. Prefer targeted file tools for edits; set `allowDangerousShell: true` or `NIGHTCODE_ALLOW_DANGEROUS_SHELL=true` only for deliberately trusted runs.
+`verify` runs formatting, linting, workspace-parallel TypeScript checks, tests with source-only text and LCOV coverage, enforced coverage floors, and dependency-ordered production builds. Useful focused commands are:
 
-Shared request and response schemas live in `@nightcode/shared`.
+```powershell
+bun run test:watch
+bun run test:stress
+bun run eval:harness
+bun run build:cli:compile
+bun run build:cli:bytecode
+bun run deps:check
+bun run clean
+```
+
+CI should install exact lockfile versions with `bun ci` before `bun run verify`. Local package binaries run with `bunx --no-install`, so a missing development dependency fails instead of being downloaded implicitly.
+
+The bytecode CLI is an ESM standalone executable tied to the Bun version that built it. The regular bundle and compiled executable remain available for development and distribution respectively.
+
+The repository uses TypeScript 7's native `tsc` with eight parallel checkers. No TypeScript compiler API compatibility package is needed because this project does not use the compiler API or typescript-eslint.
 
 ## Packages
 
-- `packages/cli`: OpenTUI terminal interface.
-- `packages/server`: Hono backend, LLM service, model router, agent service, logger, file watcher.
-- `packages/shared`: Zod schemas, model catalog, shared types.
-- `packages/database`: Drizzle/Bun SQLite schema and client.
+- `packages/cli` — OpenTUI client and durable session repository.
+- `packages/server` — agent runtime, tools, policy, MCP adapter, HTTP API, and model routing.
+- `packages/shared` — versioned Zod contracts and model catalog.
+- `packages/database` — Bun SQLite/Drizzle schema and explicit database factory.

@@ -2,14 +2,17 @@ import { CommandMenu } from "@cli/components/command-menu";
 import type { CommandContext } from "@cli/components/command-menu/types";
 import { useCommandMenu } from "@cli/components/command-menu/use-command-menu";
 import { StatusBar } from "@cli/components/status-bar";
-import type { EditorTraits, KeyBinding, TextareaRenderable } from "@opentui/core";
-import { useCallback, useEffect, useRef } from "react";
+import type { EditorTraits, KeyBinding, KeyEvent, TextareaRenderable } from "@opentui/core";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 type Props = {
 	onSubmit: (value: string) => void;
 	commandContext: CommandContext;
 	disabled?: boolean;
+	vimMode?: boolean;
 };
+
+export type VimInputMode = "insert" | "normal";
 
 const TEXT_AREA_KEYBINDINGS: KeyBinding[] = [
 	{ name: "return", action: "submit" },
@@ -18,8 +21,9 @@ const TEXT_AREA_KEYBINDINGS: KeyBinding[] = [
 	{ name: "enter", shift: true, action: "newline" },
 ];
 
-export function InputBar({ onSubmit, commandContext, disabled }: Props) {
+export function InputBar({ onSubmit, commandContext, disabled, vimMode = false }: Props) {
 	const textareaRef = useRef<TextareaRenderable | null>(null);
+	const [vimInputMode, setVimInputMode] = useState<VimInputMode>("insert");
 
 	const {
 		showCommandMenu,
@@ -43,6 +47,95 @@ export function InputBar({ onSubmit, commandContext, disabled }: Props) {
 			if (textareaRef.current) textareaRef.current.traits = {};
 		};
 	}, [showCommandMenu]);
+
+	useEffect(() => {
+		setVimInputMode(vimMode ? "normal" : "insert");
+	}, [vimMode]);
+
+	const handleVimKeyDown = useCallback(
+		(event: KeyEvent) => {
+			if (!vimMode || showCommandMenu) return;
+
+			if (vimInputMode === "insert") {
+				if (event.name === "escape") {
+					event.preventDefault();
+					event.stopPropagation();
+					setVimInputMode("normal");
+				}
+				return;
+			}
+
+			// Preserve application-level shortcuts such as Ctrl+C/Ctrl+D.
+			if (event.ctrl && event.name !== "r") return;
+
+			const editor = textareaRef.current;
+			if (!editor) return;
+
+			event.preventDefault();
+			event.stopPropagation();
+
+			if (event.name === "i") {
+				if (event.shift) editor.gotoLineHome();
+				setVimInputMode("insert");
+				return;
+			}
+			if (event.name === "a") {
+				if (event.shift) editor.gotoLineEnd();
+				else editor.moveCursorRight();
+				setVimInputMode("insert");
+				return;
+			}
+			if (event.name === "o") {
+				editor.gotoLineEnd();
+				editor.newLine();
+				setVimInputMode("insert");
+				return;
+			}
+
+			switch (event.name) {
+				case "h":
+				case "backspace":
+					editor.moveCursorLeft();
+					break;
+				case "j":
+					editor.moveCursorDown();
+					break;
+				case "k":
+					editor.moveCursorUp();
+					break;
+				case "l":
+					editor.moveCursorRight();
+					break;
+				case "w":
+					editor.moveWordForward();
+					break;
+				case "b":
+					editor.moveWordBackward();
+					break;
+				case "0":
+				case "home":
+					editor.gotoLineHome();
+					break;
+				case "$":
+				case "end":
+					editor.gotoLineEnd();
+					break;
+				case "x":
+				case "delete":
+					editor.deleteChar();
+					break;
+				case "u":
+					editor.undo();
+					break;
+				case "r":
+					if (event.ctrl) editor.redo();
+					break;
+				case "escape":
+					break;
+			}
+		},
+		[showCommandMenu, vimInputMode, vimMode],
+	);
 
 	const handleExecute = useCallback(
 		async (index: number) => {
@@ -72,9 +165,8 @@ export function InputBar({ onSubmit, commandContext, disabled }: Props) {
 	}, [handleContentChange]);
 
 	const handleTextareaSubmit = useCallback(() => {
-		if (disabled) return;
-
 		const text = textareaRef.current?.plainText ?? "";
+		if (disabled && text.trim() !== "/stop") return;
 		if (showCommandMenu) {
 			void handleExecute(selectedCommandIndex);
 			return;
@@ -85,14 +177,15 @@ export function InputBar({ onSubmit, commandContext, disabled }: Props) {
 
 		onSubmit(trimmed);
 		textareaRef.current?.clear();
-	}, [disabled, showCommandMenu, selectedCommandIndex, handleExecute, onSubmit]);
+		if (vimMode) setVimInputMode("normal");
+	}, [disabled, showCommandMenu, selectedCommandIndex, handleExecute, onSubmit, vimMode]);
 
 	return (
 		<box width="100%" flexShrink={0} paddingTop={1}>
 			<box
 				border
 				borderStyle="rounded"
-				borderColor={disabled ? "#313244" : "#585b70"}
+				borderColor={disabled ? "#f9e2af" : "#585b70"}
 				backgroundColor="#181825"
 				overflow="hidden"
 			>
@@ -108,18 +201,23 @@ export function InputBar({ onSubmit, commandContext, disabled }: Props) {
 					)}
 					<textarea
 						ref={textareaRef}
-						focused={!disabled}
+						focused
 						width="100%"
 						height={3}
-						placeholder="what would you like to do? (/ for commands)"
+						placeholder={
+							disabled
+								? "agent running — /stop to cancel"
+								: "what would you like to do? (/ for commands)"
+						}
 						placeholderColor="#585b70"
 						textColor="#cdd6f4"
 						wrapMode="word"
 						keyBindings={TEXT_AREA_KEYBINDINGS}
+						onKeyDown={handleVimKeyDown}
 						onContentChange={handleTextareaContentChange}
 						onSubmit={handleTextareaSubmit}
 					/>
-					<StatusBar />
+					<StatusBar vimInputMode={vimMode ? vimInputMode : undefined} />
 				</box>
 			</box>
 		</box>

@@ -23,6 +23,7 @@ export type CommandContext = {
 	toggleVim: () => void;
 	doctor: () => void;
 	undoLastChange: () => void;
+	showApprovals: () => void;
 	showStats: () => void;
 	indexProject: () => void | Promise<void>;
 	showRepoMap: () => void;

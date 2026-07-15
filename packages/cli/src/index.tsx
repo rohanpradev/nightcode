@@ -5,7 +5,13 @@ import { ConversationPane } from "@cli/components/conversation-pane";
 import { Header } from "@cli/components/header";
 import { InputBar } from "@cli/components/input-bar";
 import { gracefulExit, setRenderer } from "@cli/services/lifecycle";
-import { type LLMMessage, type LLMProvider, llm } from "@cli/services/llm";
+import {
+	type LLMMessage,
+	type LLMProvider,
+	type LLMStreamChunk,
+	llm,
+	type PendingApproval,
+} from "@cli/services/llm";
 import {
 	createSessionId,
 	listStoredSessions,
@@ -73,7 +79,7 @@ function App({
 			? [
 					...initialSession.messages,
 					{
-						role: "system",
+						role: "notice",
 						content: `Resumed session ${initialSession.id} (${initialSession.title})`,
 					},
 				]
@@ -93,6 +99,7 @@ function App({
 		toolCalls: 0,
 	});
 	const [toolActivities, setToolActivities] = useState<ToolActivity[]>([]);
+	const [pendingApprovals, setPendingApprovals] = useState<PendingApproval[]>([]);
 	const [fileContext, setFileContext] = useState<Map<string, string>>(
 		() => new Map(initialSession?.fileContext.map((entry) => [entry.path, entry.content]) ?? []),
 	);
@@ -103,6 +110,7 @@ function App({
 	);
 	const scrollRef = useRef<ScrollBoxRenderable | null>(null);
 	const messageKeysRef = useRef(new WeakMap<LLMMessage, string>());
+	const activeAbortControllerRef = useRef<AbortController | null>(null);
 
 	// biome-ignore lint/correctness/useExhaustiveDependencies: scroll on any content change
 	useEffect(() => {
@@ -131,7 +139,7 @@ function App({
 	}, [fileContext, messages, sessionCreatedAt, sessionId, workspaceRoot]);
 
 	const systemMessage = useCallback(
-		(content: string) => setMessages((prev) => [...prev, { role: "system", content }]),
+		(content: string) => setMessages((prev) => [...prev, { role: "notice", content }]),
 		[],
 	);
 
@@ -156,13 +164,15 @@ function App({
 	}, []);
 
 	const newConversation = useCallback(() => {
+		llm.setWorkspace(workspaceRoot);
 		setSessionId(createSessionId());
 		setSessionCreatedAt(Date.now());
-		setMessages([{ role: "system", content: "Started a new conversation." }]);
+		setMessages([{ role: "notice", content: "Started a new conversation." }]);
 		setStreamingText("");
+		setPendingApprovals([]);
 		setTokenUsage({ input: 0, output: 0 });
 		setSessionStats({ startedAt: Date.now(), requests: 0, toolCalls: 0 });
-	}, []);
+	}, [workspaceRoot]);
 
 	const switchWorkspace = useCallback(
 		async (path: string, options: WorkspaceSwitchOptions = {}) => {
@@ -174,12 +184,13 @@ function App({
 
 			process.chdir(resolved);
 			llm.setWorkspace(resolved);
-			clearRepositoryIndex();
+			clearRepositoryIndex(resolved);
 
 			setWorkspaceRoot(process.cwd());
 			setFileContext(new Map());
 			setStreamingText("");
 			setToolActivities([]);
+			setPendingApprovals([]);
 			setModel(llm.config.model);
 			setProvider(llm.config.provider);
 			setAgentMode(llm.config.agentMode);
@@ -195,7 +206,7 @@ function App({
 					announce
 						? [
 								{
-									role: "system",
+									role: "notice",
 									content: `Workspace -> ${process.cwd()}\nFile context cleared. Agent access reset to this workspace plus configured allowed paths.`,
 								},
 							]
@@ -272,7 +283,7 @@ function App({
 			const next = !prev;
 			systemMessage(
 				next
-					? "Compact mode ON \u2014 older messages will be summarized to save context"
+					? "Compact mode ON \u2014 older turns will be condensed into a clearly labeled context note"
 					: "Compact mode OFF \u2014 full message history preserved",
 			);
 			return next;
@@ -548,7 +559,7 @@ function App({
 			checks.push("  \u2022 Agent mode disabled (use /agent to enable)");
 		}
 
-		checks.push("", "All checks complete.");
+		checks.push("", "Configuration checks complete. No network request was made.");
 		systemMessage(checks.join("\n"));
 	}, [provider, agentMode, systemMessage]);
 
@@ -610,13 +621,14 @@ function App({
 			setMessages([
 				...session.messages,
 				{
-					role: "system",
+					role: "notice",
 					content: `Resumed session ${session.id} (${session.title})`,
 				},
 			]);
 			setFileContext(new Map(session.fileContext.map((entry) => [entry.path, entry.content])));
 			setStreamingText("");
 			setToolActivities([]);
+			setPendingApprovals([]);
 		},
 		[systemMessage, switchWorkspace],
 	);
@@ -634,10 +646,10 @@ function App({
 	const handleIndexProject = useCallback(async () => {
 		systemMessage(`Indexing ${workspaceRoot}...`);
 		try {
-			clearRepositoryIndex();
+			clearRepositoryIndex(workspaceRoot);
 			const indexedFiles = await indexDirectory(workspaceRoot);
 			systemMessage(
-				`Indexed ${indexedFiles} file(s), ${getSymbolCount()} symbol(s). Use /map for a compact repository map.`,
+				`Indexed ${indexedFiles} file(s), ${getSymbolCount(workspaceRoot)} symbol(s). Use /map for a compact repository map.`,
 			);
 		} catch (err) {
 			systemMessage(`Index failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -645,18 +657,177 @@ function App({
 	}, [systemMessage, workspaceRoot]);
 
 	const handleShowRepoMap = useCallback(() => {
-		const symbolCount = getSymbolCount();
+		const symbolCount = getSymbolCount(workspaceRoot);
 		if (symbolCount === 0) {
 			systemMessage("No repository map yet. Run /index first.");
 			return;
 		}
-		systemMessage(generateRepomap(2500));
-	}, [systemMessage]);
+		systemMessage(generateRepomap(2500, workspaceRoot));
+	}, [systemMessage, workspaceRoot]);
 
 	const handleShowCommandUsage = useCallback(
 		(command: string) => systemMessage(`Usage: ${command}`),
 		[systemMessage],
 	);
+
+	async function consumeAgentStream(stream: AsyncIterable<LLMStreamChunk>): Promise<{
+		text: string;
+		toolCalls: number;
+		finishReason?: string;
+	}> {
+		let text = "";
+		let toolCalls = 0;
+		let finishReason: string | undefined;
+		for await (const chunk of stream) {
+			switch (chunk.type) {
+				case "text":
+					text += chunk.text;
+					setStreamingText(text);
+					break;
+
+				case "tool-call":
+					toolCalls++;
+					setToolActivities((prev) => [
+						...prev,
+						{
+							id: chunk.toolCall.id ?? crypto.randomUUID(),
+							name: chunk.toolCall.name,
+							args: chunk.toolCall.args,
+							startedAt: Date.now(),
+						},
+					]);
+					break;
+
+				case "tool-result":
+					setToolActivities((prev) => {
+						const matchId = chunk.toolResult.toolCallId ?? chunk.toolResult.id;
+						const index = matchId
+							? prev.findIndex((activity) => activity.id === matchId)
+							: prev.findLastIndex(
+									(activity) => activity.name === chunk.toolResult.name && activity.result == null,
+								);
+						if (index < 0) return prev;
+						return prev.map((activity, activityIndex) =>
+							activityIndex === index
+								? {
+										...activity,
+										result: chunk.toolResult.result,
+										durationMs: Date.now() - activity.startedAt,
+									}
+								: activity,
+						);
+					});
+					break;
+
+				case "approval-request":
+					setPendingApprovals((prev) => [
+						...prev.filter((approval) => approval.id !== chunk.approval.id),
+						chunk.approval,
+					]);
+					systemMessage(
+						[
+							`Approval required: ${chunk.approval.toolName}`,
+							`ID: ${chunk.approval.id}`,
+							`Arguments: ${JSON.stringify(chunk.approval.args)}`,
+							`Use /approve ${chunk.approval.id} or /deny ${chunk.approval.id}`,
+						].join("\n"),
+					);
+					break;
+
+				case "approval-response":
+					setPendingApprovals((prev) =>
+						prev.filter((approval) => approval.id !== chunk.approval.id),
+					);
+					break;
+
+				case "aborted":
+					systemMessage(`Run stopped${chunk.reason ? `: ${chunk.reason}` : "."}`);
+					finishReason = "aborted";
+					break;
+
+				case "error":
+					throw new Error(chunk.error);
+
+				case "done":
+					finishReason = chunk.finishReason;
+					if (chunk.usage) {
+						setTokenUsage((prev) => ({
+							input: prev.input + (chunk.usage?.inputTokens ?? 0),
+							output: prev.output + (chunk.usage?.outputTokens ?? 0),
+						}));
+					}
+					break;
+			}
+		}
+		return { text, toolCalls, finishReason };
+	}
+
+	const handleShowApprovals = useCallback(() => {
+		const approvals = llm.getPendingApprovals();
+		if (approvals.length === 0) {
+			systemMessage("No tool actions are waiting for approval.");
+			return;
+		}
+		systemMessage(
+			[
+				"─── Pending Approvals ───",
+				...approvals.map(
+					(approval) => `  ${approval.id}  ${approval.toolName}  ${JSON.stringify(approval.args)}`,
+				),
+			].join("\n"),
+		);
+	}, [systemMessage]);
+
+	const handleUndoLastChange = useCallback(async () => {
+		try {
+			systemMessage(await llm.undoLastPatch());
+		} catch (error) {
+			systemMessage(`Undo failed: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	}, [systemMessage]);
+
+	async function handleResolveApproval(id: string, approved: boolean): Promise<void> {
+		const approvals = llm.getPendingApprovals();
+		const approvalId = id || (approvals.length === 1 ? (approvals[0]?.id ?? "") : "");
+		if (!approvalId || !approvals.some((approval) => approval.id === approvalId)) {
+			systemMessage(
+				approvals.length === 0
+					? "No tool actions are waiting for approval."
+					: `Approval not found. Use /approvals and then /${approved ? "approve" : "deny"} <id>.`,
+			);
+			return;
+		}
+
+		const startedAt = Date.now();
+		const abortController = new AbortController();
+		activeAbortControllerRef.current = abortController;
+		setIsLoading(true);
+		setStreamingText("");
+		try {
+			const outcome = await consumeAgentStream(
+				llm.resolveApproval(
+					{ approvalId, approved, reason: approved ? undefined : "Denied by user" },
+					{ sessionId, abortSignal: abortController.signal },
+				),
+			);
+			if (outcome.text) {
+				setMessages((prev) => [...prev, { role: "assistant", content: outcome.text }]);
+			}
+			setSessionStats((prev) => ({
+				...prev,
+				requests: prev.requests + 1,
+				toolCalls: prev.toolCalls + outcome.toolCalls,
+				lastLatencyMs: Date.now() - startedAt,
+			}));
+		} catch (error) {
+			systemMessage(error instanceof Error ? error.message : String(error));
+		} finally {
+			activeAbortControllerRef.current = null;
+			setIsLoading(false);
+			setStreamingText("");
+			setToolActivities([]);
+		}
+	}
 
 	const commandContext: CommandContext = {
 		exit: gracefulExit,
@@ -680,15 +851,8 @@ function App({
 		clearFileContext: handleClearFileContext,
 		toggleVim: handleToggleVim,
 		doctor: handleDoctor,
-		undoLastChange: () =>
-			systemMessage(
-				[
-					"Night Code does not create automatic checkpoints yet.",
-					"Inspect changes with: git status --short",
-					"Undo the last commit but keep files changed with: git reset --soft HEAD~1",
-					"Discard specific file edits manually only after reviewing them.",
-				].join("\n"),
-			),
+		undoLastChange: handleUndoLastChange,
+		showApprovals: handleShowApprovals,
 		showStats: handleShowStats,
 		indexProject: handleIndexProject,
 		showRepoMap: handleShowRepoMap,
@@ -706,26 +870,16 @@ function App({
 
 	async function handleSubmit(value: string) {
 		const trimmed = value.trim();
-		if (!trimmed || isLoading) return;
-
-		const promptShortcuts: Record<string, string> = {
-			"/plan":
-				"Inspect the project, identify the smallest safe implementation plan, call out risks, and wait for my confirmation before editing files.",
-			"/fix":
-				"Find the highest-impact bug or incomplete implementation related to the current context, fix it, and run the most relevant verification.",
-			"/review":
-				"Review the current project for bugs, risky behavior, missing verification, and CLI usability issues. Lead with findings and include file references.",
-			"/explain":
-				"Explain the project architecture, the main runtime flow, and the files I should read first. Keep it concise and concrete.",
-			"/test":
-				"Run the relevant project checks, summarize any failures with exact commands and files, and fix straightforward issues.",
-		};
-
-		const promptShortcut = promptShortcuts[trimmed];
-		if (promptShortcut) {
-			await handleSubmit(promptShortcut);
+		if (!trimmed) return;
+		if (trimmed === "/stop") {
+			if (activeAbortControllerRef.current) {
+				activeAbortControllerRef.current.abort("cancelled by user");
+			} else {
+				systemMessage("No run is active.");
+			}
 			return;
 		}
+		if (isLoading) return;
 
 		// Handle parameterized slash commands
 		const slashCommand = parseSlashCommand(trimmed);
@@ -825,9 +979,14 @@ function App({
 				return;
 			}
 
+			if (name === "approve" || name === "deny") {
+				await handleResolveApproval(arg, name === "approve");
+				return;
+			}
+
 			const cmd = COMMANDS.find((c) => c.name === name);
 			if (cmd?.action && !arg) {
-				cmd.action(commandContext);
+				await cmd.action(commandContext);
 				return;
 			}
 
@@ -852,88 +1011,40 @@ function App({
 		setStreamingText("");
 		setToolActivities([]);
 		const requestStartedAt = Date.now();
-		let requestToolCalls = 0;
+		const abortController = new AbortController();
+		activeAbortControllerRef.current = abortController;
 
 		try {
-			let accumulated = "";
 			const messagesForLLM = compactMode
 				? (compactMessages([...messages, userMessage], 8) as LLMMessage[])
 				: [...messages, userMessage];
-
-			for await (const chunk of llm.stream(messagesForLLM)) {
-				switch (chunk.type) {
-					case "text":
-						accumulated += chunk.text;
-						setStreamingText(accumulated);
-						break;
-
-					case "tool-call": {
-						const tc = chunk.toolCall;
-						if (tc) {
-							requestToolCalls++;
-							setToolActivities((prev) => [
-								...prev,
-								{
-									id: crypto.randomUUID(),
-									name: tc.name,
-									args: tc.args,
-									startedAt: Date.now(),
-								},
-							]);
-						}
-						break;
-					}
-
-					case "tool-result": {
-						const tr = chunk.toolResult;
-						if (tr) {
-							setToolActivities((prev) => {
-								const updated = [...prev];
-								const last = updated.findLast((t) => t.name === tr.name && !t.result);
-								if (last) {
-									last.result = tr.result;
-									last.durationMs = Date.now() - last.startedAt;
-								}
-								return updated;
-							});
-						}
-						break;
-					}
-
-					case "error":
-						throw new Error(chunk.error);
-
-					case "done":
-						if (chunk.usage) {
-							setTokenUsage((prev) => ({
-								input: prev.input + (chunk.usage?.inputTokens ?? 0),
-								output: prev.output + (chunk.usage?.outputTokens ?? 0),
-							}));
-						}
-						break;
-				}
+			const outcome = await consumeAgentStream(
+				llm.stream(messagesForLLM, undefined, {
+					sessionId,
+					abortSignal: abortController.signal,
+				}),
+			);
+			if (outcome.text) {
+				setMessages((prev) => [...prev, { role: "assistant", content: outcome.text }]);
+			} else if (!["approval-required", "aborted"].includes(outcome.finishReason ?? "")) {
+				setMessages((prev) => [...prev, { role: "assistant", content: "(no response)" }]);
 			}
-
-			setMessages((prev) => [
-				...prev,
-				{ role: "assistant", content: accumulated || "(no response)" },
-			]);
 			setSessionStats((prev) => ({
 				...prev,
 				requests: prev.requests + 1,
-				toolCalls: prev.toolCalls + requestToolCalls,
+				toolCalls: prev.toolCalls + outcome.toolCalls,
 				lastLatencyMs: Date.now() - requestStartedAt,
 			}));
 		} catch (err) {
 			const msg = err instanceof Error ? err.message : "Unknown error";
-			setMessages((prev) => [...prev, { role: "system", content: `Error: ${msg}` }]);
+			setMessages((prev) => [...prev, { role: "notice", content: `Error: ${msg}` }]);
 			setSessionStats((prev) => ({
 				...prev,
 				requests: prev.requests + 1,
-				toolCalls: prev.toolCalls + requestToolCalls,
 				lastLatencyMs: Date.now() - requestStartedAt,
 			}));
 		} finally {
+			activeAbortControllerRef.current = null;
 			setIsLoading(false);
 			setStreamingText("");
 			setToolActivities([]);
@@ -959,6 +1070,7 @@ function App({
 					isLoading={isLoading}
 					streamingText={streamingText}
 					toolActivities={toolActivities}
+					pendingApprovals={pendingApprovals}
 					model={model}
 					provider={provider}
 					agentMode={agentMode}
@@ -966,7 +1078,12 @@ function App({
 					getMessageKey={getMessageKey}
 				/>
 
-				<InputBar onSubmit={handleSubmit} commandContext={commandContext} disabled={isLoading} />
+				<InputBar
+					onSubmit={handleSubmit}
+					commandContext={commandContext}
+					disabled={isLoading}
+					vimMode={vimMode}
+				/>
 			</box>
 		</box>
 	);

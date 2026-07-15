@@ -1,66 +1,48 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { approvalModeSchema } from "@nightcode/shared";
 import { z } from "zod";
 
 export interface NightcodeConfig {
-	/** Default model to use */
 	model?: string;
-
-	/** Default mode (BUILD or PLAN) */
 	mode?: "BUILD" | "PLAN";
-
-	/** Max tokens for responses */
 	maxTokens?: number;
-
-	/** Temperature for LLM */
 	temperature?: number;
-
-	/** Auto-commit after successful changes */
-	autoCommit?: boolean;
-
-	/** Auto-run typecheck after edits */
-	autoTypecheck?: boolean;
-
-	/** Auto-run lint after edits */
-	autoLint?: boolean;
-
-	/** Max self-correction attempts */
 	maxRetries?: number;
-
-	/** Max agent loop steps before stopping */
 	maxAgentSteps?: number;
-
-	/** Custom allowed paths */
+	maxToolOutputChars?: number;
+	maxToolTimeoutMs?: number;
 	allowedPaths?: string[];
-
-	/** Disabled tools */
 	disabledTools?: string[];
-
-	/** Allow dangerous shell commands without guardrail blocking */
-	allowDangerousShell?: boolean;
-
-	/** Require the agent to create/update a task plan before writing files */
 	requirePlanForEdits?: boolean;
-
-	/** Context window token budget */
 	contextBudget?: number;
+	approvalMode?: "always" | "on-risk" | "never";
+	/** @deprecated Prefer approvalMode. Kept as an explicit compatibility escape hatch. */
+	allowDangerousShell?: boolean;
+}
 
-	/** Provider preference order */
-	providers?: string[];
+export interface MCPServerConfig {
+	command?: string;
+	args?: string[];
+	transport: "stdio" | "http";
+	url?: string;
+	env?: Record<string, string>;
+	headers?: Record<string, string>;
+	allowedTools?: string[];
+	requireApproval?: boolean;
+}
+
+export interface ConfigDiagnostic {
+	file: string;
+	message: string;
+	severity: "error" | "warning";
 }
 
 export interface ProjectConfig {
 	config: NightcodeConfig;
 	instructions: string | null;
 	mcpServers: Record<string, MCPServerConfig> | null;
-}
-
-interface MCPServerConfig {
-	command?: string;
-	args?: string[];
-	transport: "stdio" | "http";
-	url?: string;
-	env?: Record<string, string>;
+	diagnostics: ConfigDiagnostic[];
 }
 
 const CONFIG_DIR = ".nightcode";
@@ -75,61 +57,97 @@ const ROOT_INSTRUCTION_FILES = [
 	".codex/instructions.md",
 ];
 
-const nightcodeConfigSchema = z.object({
-	model: z.string().min(1).optional(),
-	mode: z.enum(["BUILD", "PLAN"]).optional(),
-	maxTokens: z.number().int().positive().optional(),
-	temperature: z.number().min(0).max(2).optional(),
-	autoCommit: z.boolean().optional(),
-	autoTypecheck: z.boolean().optional(),
-	autoLint: z.boolean().optional(),
-	maxRetries: z.number().int().nonnegative().optional(),
-	maxAgentSteps: z.number().int().positive().optional(),
-	allowedPaths: z.array(z.string().min(1)).optional(),
-	disabledTools: z.array(z.string().min(1)).optional(),
-	allowDangerousShell: z.boolean().optional(),
-	requirePlanForEdits: z.boolean().optional(),
-	contextBudget: z.number().int().positive().optional(),
-	providers: z.array(z.string().min(1)).optional(),
-});
+const nightcodeConfigSchema = z
+	.object({
+		model: z.string().min(1).optional(),
+		mode: z.enum(["BUILD", "PLAN"]).optional(),
+		maxTokens: z.number().int().positive().max(128_000).optional(),
+		temperature: z.number().min(0).max(2).optional(),
+		maxRetries: z.number().int().nonnegative().max(10).optional(),
+		maxAgentSteps: z.number().int().positive().max(200).optional(),
+		maxToolOutputChars: z.number().int().min(1_000).max(1_000_000).optional(),
+		maxToolTimeoutMs: z.number().int().min(1_000).max(600_000).optional(),
+		allowedPaths: z.array(z.string().min(1)).max(100).optional(),
+		disabledTools: z.array(z.string().min(1)).max(100).optional(),
+		requirePlanForEdits: z.boolean().optional(),
+		contextBudget: z.number().int().min(1_000).max(1_000_000).optional(),
+		approvalMode: approvalModeSchema.optional(),
+		allowDangerousShell: z.boolean().optional(),
+	})
+	.strict();
 
-const mcpServerConfigSchema = z.object({
-	command: z.string().optional(),
-	args: z.array(z.string()).optional(),
-	transport: z.enum(["stdio", "http"]),
-	url: z.string().optional(),
-	env: z.record(z.string(), z.string()).optional(),
-});
+const mcpServerConfigSchema = z
+	.object({
+		command: z.string().min(1).optional(),
+		args: z.array(z.string()).optional(),
+		transport: z.enum(["stdio", "http"]),
+		url: z.url().optional(),
+		env: z.record(z.string(), z.string()).optional(),
+		headers: z.record(z.string(), z.string()).optional(),
+		allowedTools: z.array(z.string().min(1)).optional(),
+		requireApproval: z.boolean().default(true),
+	})
+	.strict()
+	.superRefine((value, ctx) => {
+		if (value.transport === "stdio" && !value.command) {
+			ctx.addIssue({
+				code: "custom",
+				path: ["command"],
+				message: "stdio transport requires command",
+			});
+		}
+		if (value.transport === "http" && !value.url) {
+			ctx.addIssue({ code: "custom", path: ["url"], message: "http transport requires url" });
+		}
+	});
 
 const mcpServersConfigSchema = z.record(z.string(), mcpServerConfigSchema);
 
-/** Load project configuration from .nightcode/ directory */
+function formatIssues(error: z.ZodError): string {
+	return error.issues
+		.map((issue) => `${issue.path.length > 0 ? issue.path.join(".") : "config"}: ${issue.message}`)
+		.join("; ");
+}
+
+/** Load and validate all project configuration without silently discarding errors. */
 export function loadProjectConfig(rootDir?: string): ProjectConfig {
 	const root = rootDir ?? process.cwd();
 	const configDir = join(root, CONFIG_DIR);
+	const diagnostics: ConfigDiagnostic[] = [];
 
 	return {
-		config: loadConfig(configDir),
-		instructions: loadInstructions(root, configDir),
-		mcpServers: loadMcpConfig(configDir),
+		config: loadConfig(configDir, diagnostics),
+		instructions: loadInstructions(root, configDir, diagnostics),
+		mcpServers: loadMcpConfig(configDir, diagnostics),
+		diagnostics,
 	};
 }
 
-function loadConfig(configDir: string): NightcodeConfig {
+function loadConfig(configDir: string, diagnostics: ConfigDiagnostic[]): NightcodeConfig {
 	const configPath = join(configDir, CONFIG_FILE);
 	if (!existsSync(configPath)) return {};
 
 	try {
-		const content = readFileSync(configPath, "utf8");
-		// Simple YAML parser for flat config (avoid heavy yaml dependency)
-		const parsed = nightcodeConfigSchema.safeParse(parseSimpleYaml(content));
-		return parsed.success ? parsed.data : {};
-	} catch {
-		return {};
+		const value = Bun.YAML.parse(readFileSync(configPath, "utf8"));
+		const parsed = nightcodeConfigSchema.safeParse(value ?? {});
+		if (parsed.success) return parsed.data;
+		diagnostics.push({ file: configPath, severity: "error", message: formatIssues(parsed.error) });
+	} catch (error) {
+		diagnostics.push({
+			file: configPath,
+			severity: "error",
+			message: error instanceof Error ? error.message : String(error),
+		});
 	}
+
+	return {};
 }
 
-function loadInstructions(root: string, configDir: string): string | null {
+function loadInstructions(
+	root: string,
+	configDir: string,
+	diagnostics: ConfigDiagnostic[],
+): string | null {
 	const instructionPaths = [
 		join(configDir, INSTRUCTIONS_FILE),
 		...ROOT_INSTRUCTION_FILES.map((file) => join(root, file)),
@@ -140,13 +158,16 @@ function loadInstructions(root: string, configDir: string): string | null {
 	const sections: string[] = [];
 	for (const instructionPath of instructionPaths) {
 		if (!existsSync(instructionPath)) continue;
-
 		try {
 			const content = readFileSync(instructionPath, "utf8").trim();
-			if (content) {
-				sections.push(`# ${instructionPath}\n\n${content}`);
-			}
-		} catch {}
+			if (content) sections.push(`# ${instructionPath}\n\n${content}`);
+		} catch (error) {
+			diagnostics.push({
+				file: instructionPath,
+				severity: "warning",
+				message: error instanceof Error ? error.message : String(error),
+			});
+		}
 	}
 
 	return sections.length > 0 ? sections.join("\n\n") : null;
@@ -155,7 +176,6 @@ function loadInstructions(root: string, configDir: string): string | null {
 function loadGitHubInstructionFiles(root: string): string[] {
 	const instructionsDir = join(root, ".github", "instructions");
 	if (!existsSync(instructionsDir)) return [];
-
 	try {
 		return readdirSync(instructionsDir)
 			.filter((file) => file.endsWith(".instructions.md"))
@@ -169,7 +189,6 @@ function loadGitHubInstructionFiles(root: string): string[] {
 function loadCursorRuleFiles(root: string): string[] {
 	const rulesDir = join(root, ".cursor", "rules");
 	if (!existsSync(rulesDir)) return [];
-
 	try {
 		return readdirSync(rulesDir)
 			.filter((file) => file.endsWith(".mdc") || file.endsWith(".md"))
@@ -180,65 +199,29 @@ function loadCursorRuleFiles(root: string): string[] {
 	}
 }
 
-function loadMcpConfig(configDir: string): Record<string, MCPServerConfig> | null {
+function loadMcpConfig(
+	configDir: string,
+	diagnostics: ConfigDiagnostic[],
+): Record<string, MCPServerConfig> | null {
 	const mcpPath = join(configDir, MCP_FILE);
 	if (!existsSync(mcpPath)) return null;
 
 	try {
-		const content = readFileSync(mcpPath, "utf8");
-		const parsed = JSON.parse(content);
+		const parsed = JSON.parse(readFileSync(mcpPath, "utf8"));
 		const serverConfig =
 			parsed && typeof parsed === "object" && "servers" in parsed
 				? (parsed as { servers: unknown }).servers
 				: parsed;
 		const result = mcpServersConfigSchema.safeParse(serverConfig);
-		return result.success ? result.data : null;
-	} catch {
-		return null;
-	}
-}
-
-/** Parse simple flat YAML (key: value pairs, no nesting beyond arrays) */
-function parseSimpleYaml(content: string): Record<string, unknown> {
-	const config: Record<string, unknown> = {};
-	const lines = content.split("\n");
-
-	for (const line of lines) {
-		const trimmed = line.trim();
-
-		if (!trimmed || trimmed.startsWith("#")) continue;
-
-		const colonIdx = trimmed.indexOf(":");
-
-		if (colonIdx === -1) continue;
-
-		const key = trimmed.slice(0, colonIdx).trim();
-		const value = trimmed.slice(colonIdx + 1).trim();
-
-		if (!value) continue;
-
-		config[key] = parseSimpleYamlValue(value);
+		if (result.success) return result.data;
+		diagnostics.push({ file: mcpPath, severity: "error", message: formatIssues(result.error) });
+	} catch (error) {
+		diagnostics.push({
+			file: mcpPath,
+			severity: "error",
+			message: error instanceof Error ? error.message : String(error),
+		});
 	}
 
-	return config;
-}
-
-function parseSimpleYamlValue(value: string): unknown {
-	if (value === "true") return true;
-	if (value === "false") return false;
-	if (/^\d+$/.test(value)) return Number.parseInt(value, 10);
-	if (/^\d+\.\d+$/.test(value)) return Number.parseFloat(value);
-
-	if (value.startsWith("[") && value.endsWith("]")) {
-		const inner = value.slice(1, -1).trim();
-		if (!inner) return [];
-
-		return inner.split(",").map((item) => stripYamlString(item.trim()));
-	}
-
-	return stripYamlString(value);
-}
-
-function stripYamlString(value: string): string {
-	return value.replace(/^["']|["']$/g, "");
+	return null;
 }

@@ -7,16 +7,18 @@
 		"nightcode": "./bin/nightcode.ts"
 	},
 	"scripts": {
-		"dev": "bun run --watch src/index.tsx",
-		"build": "bun build src/index.tsx --outdir dist --target bun '--external=@opentui/core-darwin-x64' '--external=@opentui/core-darwin-arm64' '--external=@opentui/core-linux-x64-musl' '--external=@opentui/core-linux-x64' '--external=@opentui/core-linux-arm64-musl' '--external=@opentui/core-linux-arm64' '--external=@opentui/core-win32-arm64' --minify --sourcemap=external",
-		"build:bytecode": "bun build src/index.tsx --outdir dist --target bun '--external=@opentui/core-darwin-x64' '--external=@opentui/core-darwin-arm64' '--external=@opentui/core-linux-x64-musl' '--external=@opentui/core-linux-x64' '--external=@opentui/core-linux-arm64-musl' '--external=@opentui/core-linux-arm64' '--external=@opentui/core-win32-arm64' --bytecode --minify --sourcemap=external",
-		"build:compile": "bun build src/index.tsx --compile '--external=@opentui/core-darwin-x64' '--external=@opentui/core-darwin-arm64' '--external=@opentui/core-linux-x64-musl' '--external=@opentui/core-linux-x64' '--external=@opentui/core-linux-arm64-musl' '--external=@opentui/core-linux-arm64' '--external=@opentui/core-win32-arm64' --minify --sourcemap=external --outfile dist/nightcode.exe"
+		"dev": "bun --watch run src/index.tsx",
+		"build": "bun run scripts/build.ts bundle",
+		"build:compile": "bun run scripts/build.ts compile",
+		"build:bytecode": "bun run scripts/build.ts bytecode",
+		"typecheck": "bunx --no-install --bun tsc --noEmit --checkers 8 -p tsconfig.json"
 	},
 	"devDependencies": {
 		"@types/bun": "latest",
 		"@types/react": "^19.2.17"
 	},
 	"dependencies": {
+		"@nightcode/database": "workspace:*",
 		"@nightcode/server": "workspace:*",
 		"@nightcode/shared": "workspace:*",
 		"@opentui/core": "^0.4.2",

@@ -11,13 +11,15 @@
 		"./services/llm": "./src/services/llm.ts"
 	},
 	"scripts": {
-		"dev": "bun run --hot src/index.ts",
+		"dev": "bun --watch run src/index.ts",
 		"build": "bun build src/index.ts --outdir dist --target bun --minify --sourcemap=external",
-		"test": "bun test src"
+		"test": "bun test src",
+		"typecheck": "bunx --no-install --bun tsc --noEmit --checkers 8 -p tsconfig.json"
 	},
 	"dependencies": {
 		"@ai-sdk/anthropic": "4.0.5",
 		"@ai-sdk/azure": "4.0.5",
+		"@ai-sdk/mcp": "^2.0.13",
 		"@ai-sdk/openai": "4.0.5",
 		"@hono/zod-validator": "^0.8.0",
 		"@nightcode/database": "workspace:*",

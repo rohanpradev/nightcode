@@ -7,6 +7,7 @@ import {
 	type StoredSession,
 } from "@cli/services/sessions";
 import { resolveUserPath } from "@cli/slash-commands";
+import { NIGHTCODE_VERSION } from "@cli/version";
 import { clearRepositoryIndex } from "@nightcode/server/lib/context-engine";
 import { getDefaultModelForProvider, getProviderForModel } from "@nightcode/shared";
 
@@ -23,9 +24,72 @@ export type StartupState = {
 
 const COMMAND_NAMES = new Set(["continue", "doctor", "resume", "ui-smoke"]);
 const VALUE_FLAGS = new Set(["--workspace", "--cwd", "-w", "--resume", "-r", "--ui-smoke-ms"]);
+const BOOLEAN_FLAGS = new Set([
+	"--continue",
+	"--doctor",
+	"--help",
+	"-h",
+	"--json",
+	"--ui-smoke",
+	"--version",
+	"-v",
+]);
 
 function cliArgs(): string[] {
 	return Bun.argv.slice(2);
+}
+
+export function validateCliArguments(args: string[] = cliArgs()): void {
+	for (let index = 0; index < args.length; index++) {
+		const arg = args[index];
+		if (!arg?.startsWith("-")) continue;
+		if (BOOLEAN_FLAGS.has(arg)) continue;
+		const valueFlag = [...VALUE_FLAGS].find((flag) => arg === flag || arg.startsWith(`${flag}=`));
+		if (!valueFlag) throw new Error(`Unknown option: ${arg}\nRun nightcode --help for usage.`);
+		if (arg === valueFlag) {
+			const value = args[index + 1];
+			if (!value || value.startsWith("-")) throw new Error(`Missing value for ${arg}`);
+			index++;
+		} else if (!arg.slice(valueFlag.length + 1)) {
+			throw new Error(`Missing value for ${valueFlag}`);
+		}
+	}
+}
+
+export function isHelpCommand(): boolean {
+	return cliArgs().some((arg) => arg === "--help" || arg === "-h" || arg === "help");
+}
+
+export function isVersionCommand(): boolean {
+	return cliArgs().some((arg) => arg === "--version" || arg === "-v" || arg === "version");
+}
+
+export function printCliHelp(): void {
+	const lines = [
+		`Nightcode v${NIGHTCODE_VERSION} - terminal-first coding-agent harness`,
+		"",
+		"Usage:",
+		"  nightcode [workspace]",
+		"  nightcode --workspace <directory>",
+		"  nightcode --continue",
+		"  nightcode --resume <session-id>",
+		"  nightcode doctor [--json]",
+		"",
+		"Options:",
+		"  -w, --workspace <dir>   Open a workspace",
+		"  -r, --resume <id>       Resume an exact or unique session id prefix",
+		"      --continue          Resume the latest workspace session",
+		"      --doctor            Print local configuration diagnostics",
+		"  -h, --help              Show this help",
+		"  -v, --version           Print the version",
+		"",
+		"Inside the TUI, type /help for interactive commands.",
+	];
+	process.stdout.write(`${lines.join("\n")}\n`);
+}
+
+export function printCliVersion(): void {
+	process.stdout.write(`${NIGHTCODE_VERSION}\n`);
 }
 
 function hasFlag(name: string): boolean {
@@ -100,9 +164,7 @@ export function compatibleModelForProvider(provider: LLMProvider, currentModel: 
 		: (getDefaultModelForProvider(provider) ?? currentModel);
 }
 
-function requestedWorkspace(): string | null {
-	const args = cliArgs();
-
+export function requestedWorkspace(args: string[] = cliArgs()): string | null {
 	for (let index = 0; index < args.length; index++) {
 		const arg = args[index];
 		if (!arg) continue;
@@ -117,6 +179,10 @@ function requestedWorkspace(): string | null {
 
 		if (arg.startsWith("--cwd=")) {
 			return arg.slice("--cwd=".length);
+		}
+
+		if (arg.startsWith("-w=")) {
+			return arg.slice("-w=".length);
 		}
 	}
 
@@ -237,7 +303,8 @@ function providerEnvStatus(): Record<string, boolean> {
 		OPENAI_API_KEY: Boolean(process.env.OPENAI_API_KEY?.trim()),
 		ANTHROPIC_API_KEY: Boolean(process.env.ANTHROPIC_API_KEY?.trim()),
 		AZURE_OPENAI_API_KEY: Boolean(process.env.AZURE_OPENAI_API_KEY?.trim()),
-		AZURE_OPENAI_ENDPOINT: Boolean(process.env.AZURE_OPENAI_ENDPOINT?.trim()),
+		AZURE_OPENAI_RESOURCE_NAME: Boolean(process.env.AZURE_OPENAI_RESOURCE_NAME?.trim()),
+		AZURE_OPENAI_BASE_URL: Boolean(process.env.AZURE_OPENAI_BASE_URL?.trim()),
 	};
 }
 

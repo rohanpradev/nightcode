@@ -5,7 +5,6 @@ export const COMMANDS: CommandItem[] = [
 		name: "help",
 		description: "Show available commands and keyboard shortcuts",
 		value: "/help",
-		shortcut: "?",
 		action: ({ showHelp }) => showHelp(),
 	},
 	{
@@ -52,14 +51,12 @@ export const COMMANDS: CommandItem[] = [
 		name: "new",
 		description: "Start a new conversation (preserves history)",
 		value: "/new",
-		shortcut: "Ctrl+N",
 		action: ({ newConversation }) => newConversation(),
 	},
 	{
 		name: "clear",
 		description: "Clear the screen and conversation history",
 		value: "/clear",
-		shortcut: "Ctrl+L",
 		action: ({ clear }) => clear(),
 	},
 	{
@@ -86,7 +83,6 @@ export const COMMANDS: CommandItem[] = [
 		name: "agent",
 		description: "Toggle agentic mode (tool use: shell, files)",
 		value: "/agent",
-		shortcut: "Ctrl+A",
 		action: ({ toggleAgent }) => toggleAgent(),
 	},
 	{
@@ -198,7 +194,6 @@ export const COMMANDS: CommandItem[] = [
 		name: "undo",
 		description: "Restore the most recent Night Code patch checkpoint",
 		value: "/undo",
-		shortcut: "Ctrl+Z",
 		action: ({ undoLastChange }) => undoLastChange(),
 	},
 	{
@@ -268,7 +263,6 @@ export const COMMANDS: CommandItem[] = [
 		name: "exit",
 		description: "Exit the application",
 		value: "/exit",
-		shortcut: "Ctrl+D",
 		action: ({ exit }) => exit(),
 	},
 ];

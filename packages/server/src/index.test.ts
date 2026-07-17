@@ -3,6 +3,7 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import app from "./index";
+import { runtimeManager } from "./services/runtime-manager";
 
 describe("server routes", () => {
 	it("reports health and supports HEAD through the GET handler", async () => {
@@ -64,17 +65,7 @@ describe("server routes", () => {
 
 	it("pins an API session to its original workspace", async () => {
 		const sessionId = crypto.randomUUID();
-		const create = await app.request("/approvals", {
-			method: "POST",
-			body: JSON.stringify({
-				sessionId,
-				workspace: process.cwd(),
-				decision: { approvalId: "missing", approved: false },
-			}),
-			headers: new Headers({ "Content-Type": "application/json" }),
-		});
-		expect(create.status).toBe(200);
-		await create.text();
+		runtimeManager.getOrCreate(sessionId, process.cwd());
 
 		const mismatch = await app.request("/chat", {
 			method: "POST",
@@ -87,6 +78,38 @@ describe("server routes", () => {
 		});
 		expect(mismatch.status).toBe(409);
 		expect(await mismatch.json()).toMatchObject({ code: "SESSION_WORKSPACE_MISMATCH" });
+		runtimeManager.delete(sessionId);
+	});
+
+	it("does not allocate sessions for unknown approval ids", async () => {
+		const sessionId = crypto.randomUUID();
+		const before = runtimeManager.list().length;
+		const response = await app.request("/approvals", {
+			method: "POST",
+			body: JSON.stringify({
+				sessionId,
+				decision: { approvalId: "missing", approved: false },
+			}),
+			headers: new Headers({ "Content-Type": "application/json" }),
+		});
+		expect(response.status).toBe(404);
+		expect(runtimeManager.list()).toHaveLength(before);
+	});
+
+	it("enforces configured bearer authentication", async () => {
+		const previous = process.env.NIGHTCODE_API_TOKEN;
+		process.env.NIGHTCODE_API_TOKEN = "test-token";
+		try {
+			const denied = await app.request("/health");
+			expect(denied.status).toBe(401);
+			const allowed = await app.request("/health", {
+				headers: { Authorization: "Bearer test-token" },
+			});
+			expect(allowed.status).toBe(200);
+		} finally {
+			if (previous === undefined) delete process.env.NIGHTCODE_API_TOKEN;
+			else process.env.NIGHTCODE_API_TOKEN = previous;
+		}
 	});
 
 	it("returns structured state for unknown session approvals", async () => {

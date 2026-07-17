@@ -1,4 +1,4 @@
-import { lstat, mkdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 
 export type WorkspaceAccess = "read" | "write" | "delete" | "directory";
@@ -136,12 +136,20 @@ export async function atomicWriteFile(path: string, content: string): Promise<vo
 	const temp = `${path}.${suffix}.tmp`;
 	const backup = `${path}.${suffix}.bak`;
 	const hadTarget = await exists(path);
+	const targetMode = hadTarget ? (await stat(path)).mode : undefined;
 
-	await writeFile(temp, content, { encoding: "utf8", flag: "wx" });
+	await writeFile(temp, content, {
+		encoding: "utf8",
+		flag: "wx",
+		...(targetMode !== undefined ? { mode: targetMode } : {}),
+	});
+	if (targetMode !== undefined && process.platform !== "win32") await chmod(temp, targetMode);
 	try {
 		if (hadTarget) await rename(path, backup);
 		await rename(temp, path);
-		if (hadTarget) await rm(backup, { force: true });
+		// The replacement is committed once temp is renamed into place. A stale
+		// backup cleanup failure must not report the write as failed after commit.
+		if (hadTarget) await rm(backup, { force: true }).catch(() => undefined);
 	} catch (error) {
 		await rm(temp, { force: true }).catch(() => undefined);
 		if (hadTarget && (await exists(backup)) && !(await exists(path))) {

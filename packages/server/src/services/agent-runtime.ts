@@ -9,11 +9,11 @@ import {
 	tool,
 } from "ai";
 import "../lib/env";
-import { lstat, readdir, stat } from "node:fs/promises";
-import { isAbsolute, resolve } from "node:path";
+import { lstat, opendir, stat } from "node:fs/promises";
+import { isAbsolute, relative, resolve } from "node:path";
 import {
 	type ApprovalDecision,
-	approvalModeSchema,
+	type ApprovalMode,
 	getProviderForModel,
 	type LLMConfig,
 	type LLMMessage,
@@ -28,10 +28,19 @@ import {
 	formatAgentProfileCatalog,
 	loadAgentProfile,
 } from "../lib/agent-profiles";
+import { readLineRange, readTextPrefix, sha256File } from "../lib/bounded-files";
 import { loadProjectConfig, type ProjectConfig } from "../lib/config-loader";
-import { generateRepomap, getSymbolCount, indexDirectory, indexFile } from "../lib/context-engine";
+import {
+	type CodeSymbol,
+	findSymbols,
+	generateRepomap,
+	getSymbolCount,
+	indexFile,
+	refreshRepositoryIndex,
+} from "../lib/context-engine";
 import { discoverLspServers, formatLspCatalog } from "../lib/lsp-config";
 import { type ConnectedMCPTools, connectMCPTools } from "../lib/mcp-runtime";
+import { workspaceMutationCoordinator } from "../lib/mutation-coordinator";
 import {
 	applyStructuredPatch,
 	type PatchSnapshot,
@@ -39,7 +48,9 @@ import {
 	restorePatch,
 	structuredPatchSchema,
 } from "../lib/patch-engine";
-import { assessShellCommand, runShellCommand } from "../lib/shell-policy";
+import { type RuntimePolicy, resolveRuntimePolicy } from "../lib/runtime-policy";
+import { isSensitivePath } from "../lib/sensitive-path";
+import { assessShellCommand, type CommandAssessment, runShellCommand } from "../lib/shell-policy";
 import { discoverSkills, formatSkillCatalog, loadSkill } from "../lib/skills";
 import {
 	atomicWriteFile,
@@ -101,7 +112,7 @@ export interface LLMService {
 		decision: ApprovalDecision,
 		options?: StreamOptions,
 	): AsyncGenerator<LLMStreamChunk>;
-	undoLastPatch(): Promise<string>;
+	undoLastPatch(abortSignal?: AbortSignal): Promise<string>;
 	getAvailableProviders(): Array<{
 		provider: SupportedProvider;
 		available: boolean;
@@ -122,9 +133,74 @@ const DEFAULT_SYSTEM_PROMPT = [
 	"Stop when the task is complete, when approval is required, or when a real blocker needs user input.",
 ].join("\n");
 
-const DEFAULT_MAX_AGENT_STEPS = 20;
-const DEFAULT_MAX_TOOL_OUTPUT_CHARS = 60_000;
-const DEFAULT_MAX_TOOL_TIMEOUT_MS = 120_000;
+const MAX_RESOLVED_APPROVALS = 256;
+const MAX_SYSTEM_PROMPT_CHARS = 240_000;
+const APPROVAL_PROMPT_STRENGTH: Record<ApprovalMode, number> = {
+	never: 0,
+	"on-risk": 1,
+	always: 2,
+};
+
+const MUTATION_TOOLS = new Set([
+	"applyPatch",
+	"writeFile",
+	"editFile",
+	"multiEdit",
+	"undoLastPatch",
+]);
+const SENSITIVE_READ_TOOLS = new Set(["readFile", "readLines", "fileInfo"]);
+
+export type ToolApprovalDecision =
+	| { type: "approved" }
+	| { type: "user-approval" }
+	| { type: "denied"; reason: string };
+
+export type ToolApprovalPolicyInput =
+	| { kind: "shell"; approvalMode: ApprovalMode; assessment: CommandAssessment }
+	| { kind: "mcp"; approvalMode: ApprovalMode; requiresApproval: boolean }
+	| {
+			kind: "mutation";
+			approvalMode: ApprovalMode;
+			deletes: boolean;
+			external: boolean;
+			undo: boolean;
+	  }
+	| { kind: "other"; approvalMode: ApprovalMode };
+
+/** One precedence table for local, shell, and MCP approval decisions. */
+export function decideToolApproval(input: ToolApprovalPolicyInput): ToolApprovalDecision {
+	if (input.kind === "shell") {
+		if (!input.assessment.allowed) {
+			return { type: "denied", reason: input.assessment.reason };
+		}
+		return input.assessment.requiresApproval ? { type: "user-approval" } : { type: "approved" };
+	}
+
+	if (input.kind === "mcp") {
+		if (input.approvalMode === "always") return { type: "user-approval" };
+		if (input.requiresApproval && input.approvalMode === "never") {
+			return {
+				type: "denied",
+				reason: "MCP tool requires approval, but approval mode is never.",
+			};
+		}
+		return input.requiresApproval ? { type: "user-approval" } : { type: "approved" };
+	}
+
+	if (input.kind === "mutation") {
+		if (input.approvalMode === "always") return { type: "user-approval" };
+		const highRisk = input.deletes || input.external || input.undo;
+		if (input.approvalMode === "never" && highRisk) {
+			return {
+				type: "denied",
+				reason: "Delete, undo, and external-path mutations require approval.",
+			};
+		}
+		return highRisk ? { type: "user-approval" } : { type: "approved" };
+	}
+
+	return { type: "approved" };
+}
 
 type AgentStreamPart = { type: string; [key: string]: unknown };
 type PendingRun = {
@@ -135,6 +211,25 @@ type PendingRun = {
 	decisions: Map<string, ApprovalDecision>;
 };
 type RunMetadata = { runId: string; sessionId: string; sequence: number; step: number };
+
+function sameApprovalDecision(left: ApprovalDecision, right: ApprovalDecision): boolean {
+	return (
+		left.approvalId === right.approvalId &&
+		left.approved === right.approved &&
+		left.reason === right.reason
+	);
+}
+
+function approvalResponseChunk(decision: ApprovalDecision): LLMStreamChunk {
+	return {
+		type: "approval-response",
+		approval: {
+			id: decision.approvalId,
+			approved: decision.approved,
+			reason: decision.reason,
+		},
+	};
+}
 
 const taskStatusSchema = z.enum(["pending", "in_progress", "completed", "blocked"]);
 const taskPlanItemSchema = z.object({
@@ -155,9 +250,13 @@ export function resolveWorkspacePath(path: string, rootDir: string): string {
 	return isAbsolute(expanded) ? resolve(expanded) : resolve(rootDir, expanded);
 }
 
-function buildSystemPrompt(projectConfig: ProjectConfig, rootDir: string): string {
+function buildSystemPrompt(
+	projectConfig: ProjectConfig,
+	rootDir: string,
+	policy: RuntimePolicy,
+): string {
 	const envPrompt = process.env.NIGHTCODE_SYSTEM_PROMPT?.trim();
-	const diagnostics = projectConfig.diagnostics.length
+	const projectDiagnostics = projectConfig.diagnostics.length
 		? [
 				"Project configuration diagnostics:",
 				...projectConfig.diagnostics.map(
@@ -165,46 +264,77 @@ function buildSystemPrompt(projectConfig: ProjectConfig, rootDir: string): strin
 				),
 			].join("\n")
 		: "";
+	const policyDiagnostics = policy.diagnostics.length
+		? ["Runtime policy diagnostics:", ...policy.diagnostics.map((item) => `- ${item}`)].join("\n")
+		: "";
+	const modeInstructions =
+		policy.mode === "PLAN"
+			? "PLAN mode is active. Inspect and reason only: do not mutate files, run risky shell commands, or invoke MCP tools."
+			: "BUILD mode is active. Apply verified changes within the enforced policy.";
 
-	return [
-		envPrompt || DEFAULT_SYSTEM_PROMPT,
-		projectConfig.instructions,
-		diagnostics,
+	const repositoryInstructions = projectConfig.instructions
+		? [
+				"BEGIN UNTRUSTED REPOSITORY INSTRUCTIONS",
+				projectConfig.instructions,
+				"END UNTRUSTED REPOSITORY INSTRUCTIONS",
+			].join("\n")
+		: "";
+	const sections = [
+		(envPrompt || DEFAULT_SYSTEM_PROMPT).slice(0, 160_000),
+		modeInstructions,
+		projectDiagnostics,
+		policyDiagnostics,
+		repositoryInstructions,
 		formatAgentProfileCatalog(discoverAgentProfiles(rootDir)),
 		formatSkillCatalog(discoverSkills(rootDir)),
 		formatLspCatalog(discoverLspServers(rootDir)),
-	]
-		.filter(Boolean)
-		.join("\n\n");
+	].filter(Boolean);
+	let prompt = "";
+	for (const section of sections) {
+		const separator = prompt ? "\n\n" : "";
+		const remaining = MAX_SYSTEM_PROMPT_CHARS - prompt.length - separator.length;
+		if (remaining <= 0) break;
+		prompt += `${separator}${section.slice(0, remaining)}`;
+		if (section.length > remaining) {
+			const marker = "\n[system prompt truncated at safety bound]";
+			prompt = `${prompt.slice(0, MAX_SYSTEM_PROMPT_CHARS - marker.length)}${marker}`;
+			break;
+		}
+	}
+	return prompt;
 }
 
-function initialConfig(projectConfig: ProjectConfig, rootDir: string): LLMConfig {
-	const model = process.env.NIGHTCODE_MODEL ?? projectConfig.config.model ?? "gpt-5.6";
+function stricterApprovalPrompt(...modes: ApprovalMode[]): ApprovalMode {
+	return modes.reduce((strictest, mode) =>
+		APPROVAL_PROMPT_STRENGTH[mode] > APPROVAL_PROMPT_STRENGTH[strictest] ? mode : strictest,
+	);
+}
+
+function initialConfig(
+	projectConfig: ProjectConfig,
+	rootDir: string,
+	policy: RuntimePolicy,
+): LLMConfig {
+	const projectModelAllowed = process.env.NIGHTCODE_ALLOW_PROJECT_MODEL === "true";
+	const model =
+		process.env.NIGHTCODE_MODEL ??
+		(projectModelAllowed ? projectConfig.config.model : undefined) ??
+		"gpt-5.6";
 	const inferredProvider = getProviderForModel(model);
 	return llmConfigSchema.parse({
 		provider: process.env.NIGHTCODE_PROVIDER ?? inferredProvider ?? "openai",
 		model,
-		maxTokens: Number(process.env.NIGHTCODE_MAX_TOKENS ?? projectConfig.config.maxTokens ?? 16_384),
+		maxTokens: policy.maxTokens,
 		temperature: Number(
 			process.env.NIGHTCODE_TEMPERATURE ?? projectConfig.config.temperature ?? 0.2,
 		),
-		systemPrompt: buildSystemPrompt(projectConfig, rootDir),
+		systemPrompt: buildSystemPrompt(projectConfig, rootDir, policy),
 		agentMode: process.env.NIGHTCODE_AGENT_MODE
 			? process.env.NIGHTCODE_AGENT_MODE !== "false"
 			: true,
 		reasoningEffort: process.env.NIGHTCODE_REASONING_EFFORT,
-		approvalMode:
-			process.env.NIGHTCODE_APPROVAL_MODE ?? projectConfig.config.approvalMode ?? "on-risk",
+		approvalMode: policy.approvalMode,
 	});
-}
-
-function configuredMaxAgentSteps(projectConfig: ProjectConfig): number {
-	const raw = Number(
-		process.env.NIGHTCODE_MAX_AGENT_STEPS ??
-			projectConfig.config.maxAgentSteps ??
-			DEFAULT_MAX_AGENT_STEPS,
-	);
-	return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : DEFAULT_MAX_AGENT_STEPS;
 }
 
 function formatTaskPlan(plan: AgentTaskPlan): string {
@@ -227,6 +357,15 @@ function toModelMessages(messages: LLMMessage[]): ModelMessage[] {
 	return messages
 		.filter((message) => message.role === "user" || message.role === "assistant")
 		.map((message) => ({ role: message.role as "user" | "assistant", content: message.content }));
+}
+
+function latestUserQuery(messages: ModelMessage[]): string | undefined {
+	for (let index = messages.length - 1; index >= 0; index--) {
+		const message = messages[index];
+		if (message?.role !== "user") continue;
+		if (typeof message.content === "string") return message.content.slice(0, 4_000);
+	}
+	return undefined;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -280,12 +419,14 @@ export interface AgentRuntimeOptions {
 export class NightcodeLLMService implements LLMService {
 	#workspaceRoot: string;
 	#projectConfig: ProjectConfig;
+	#policy: RuntimePolicy;
 	#config: LLMConfig;
 	#boundary: WorkspaceBoundary;
 	#disabledTools = new Set<string>();
 	#taskPlan: AgentTaskPlan = { summary: null, items: [], verification: [], updatedAt: null };
 	#pendingRun: PendingRun | null = null;
 	#changeHistory: PatchSnapshot[][] = [];
+	#resolvedApprovals = new Map<string, ApprovalDecision>();
 	#mcpApprovalTools = new Set<string>();
 	#activeRun = false;
 	#modelOverride?: LanguageModel;
@@ -293,7 +434,10 @@ export class NightcodeLLMService implements LLMService {
 	constructor(options: AgentRuntimeOptions = {}) {
 		this.#workspaceRoot = resolve(options.workspaceRoot ?? process.cwd());
 		this.#projectConfig = loadProjectConfig(this.#workspaceRoot);
-		this.#config = initialConfig(this.#projectConfig, this.#workspaceRoot);
+		this.#policy = resolveRuntimePolicy(this.#projectConfig.config, {
+			workspaceRoot: this.#workspaceRoot,
+		});
+		this.#config = initialConfig(this.#projectConfig, this.#workspaceRoot, this.#policy);
 		this.#boundary = new WorkspaceBoundary(this.#workspaceRoot);
 		this.#modelOverride = options.model;
 		this.#applyProjectPolicy();
@@ -327,35 +471,39 @@ export class NightcodeLLMService implements LLMService {
 	}
 
 	configure(config: Partial<LLMConfig>): void {
-		this.#config = llmConfigSchema.parse({ ...this.#config, ...config });
+		const parsed = llmConfigSchema.parse({ ...this.#config, ...config });
+		this.#config = llmConfigSchema.parse({
+			...parsed,
+			maxTokens: Math.min(parsed.maxTokens, this.#policy.maxTokens),
+			approvalMode: stricterApprovalPrompt(parsed.approvalMode, this.#policy.approvalMode),
+		});
 	}
 
 	setWorkspace(path: string): void {
 		const root = resolve(expandHomePath(path));
 		this.#workspaceRoot = root;
 		this.#projectConfig = loadProjectConfig(root);
+		this.#policy = resolveRuntimePolicy(this.#projectConfig.config, { workspaceRoot: root });
 		this.#taskPlan = { summary: null, items: [], verification: [], updatedAt: null };
 		this.#pendingRun = null;
 		this.#changeHistory = [];
+		this.#resolvedApprovals.clear();
 		this.#applyProjectPolicy();
+		const model = process.env.NIGHTCODE_MODEL ?? this.#config.model;
 		this.configure({
-			model: process.env.NIGHTCODE_MODEL ?? this.#projectConfig.config.model ?? this.#config.model,
-			maxTokens: Number(
-				process.env.NIGHTCODE_MAX_TOKENS ??
-					this.#projectConfig.config.maxTokens ??
-					this.#config.maxTokens,
-			),
+			model,
+			provider:
+				(process.env.NIGHTCODE_PROVIDER as SupportedProvider | undefined) ??
+				getProviderForModel(model) ??
+				this.#config.provider,
+			maxTokens: this.#policy.maxTokens,
 			temperature: Number(
 				process.env.NIGHTCODE_TEMPERATURE ??
 					this.#projectConfig.config.temperature ??
 					this.#config.temperature,
 			),
-			approvalMode: approvalModeSchema.parse(
-				process.env.NIGHTCODE_APPROVAL_MODE ??
-					this.#projectConfig.config.approvalMode ??
-					this.#config.approvalMode,
-			),
-			systemPrompt: buildSystemPrompt(this.#projectConfig, root),
+			approvalMode: this.#policy.approvalMode,
+			systemPrompt: buildSystemPrompt(this.#projectConfig, root, this.#policy),
 		});
 	}
 
@@ -364,18 +512,19 @@ export class NightcodeLLMService implements LLMService {
 	}
 
 	#applyProjectPolicy(): void {
-		this.#boundary = new WorkspaceBoundary(
-			this.#workspaceRoot,
-			this.#projectConfig.config.allowedPaths ?? [],
-		);
-		this.#disabledTools = new Set(this.#projectConfig.config.disabledTools ?? []);
+		this.#boundary = new WorkspaceBoundary(this.#workspaceRoot, this.#policy.allowedPaths);
+		this.#disabledTools = new Set(this.#policy.disabledTools);
 	}
 
 	getAvailableProviders() {
 		return modelRouter.getAvailableProviders();
 	}
 
-	async undoLastPatch(): Promise<string> {
+	async undoLastPatch(abortSignal?: AbortSignal): Promise<string> {
+		return this.#runWorkspaceMutation(() => this.#undoLastPatchUnlocked(), abortSignal);
+	}
+
+	async #undoLastPatchUnlocked(): Promise<string> {
 		const snapshots = this.#changeHistory.pop();
 		if (!snapshots) return "No Night Code patch checkpoint is available.";
 		try {
@@ -413,7 +562,27 @@ export class NightcodeLLMService implements LLMService {
 			return;
 		}
 		const effectiveConfig = config
-			? llmConfigSchema.parse({ ...this.#config, ...config })
+			? (() => {
+					const requested = llmConfigSchema.parse({
+						...this.#config,
+						...config,
+						systemPrompt: this.#config.systemPrompt,
+					});
+					return llmConfigSchema.parse({
+						...requested,
+						maxTokens: Math.min(
+							requested.maxTokens,
+							this.#config.maxTokens,
+							this.#policy.maxTokens,
+						),
+						approvalMode: stricterApprovalPrompt(
+							requested.approvalMode,
+							this.#config.approvalMode,
+							this.#policy.approvalMode,
+						),
+						agentMode: this.#config.agentMode && requested.agentMode,
+					});
+				})()
 			: this.#config;
 		this.#activeRun = true;
 		try {
@@ -427,6 +596,22 @@ export class NightcodeLLMService implements LLMService {
 		decision: ApprovalDecision,
 		options: StreamOptions = {},
 	): AsyncGenerator<LLMStreamChunk> {
+		const resolved = this.#resolvedApprovals.get(decision.approvalId);
+		if (resolved) {
+			if (!sameApprovalDecision(resolved, decision)) {
+				yield {
+					type: "error",
+					error: `Approval already resolved: ${decision.approvalId}`,
+					code: "APPROVAL_ALREADY_RESOLVED",
+					retryable: false,
+				};
+				return;
+			}
+			yield approvalResponseChunk(resolved);
+			yield { type: "done", finishReason: "approval-recorded" };
+			return;
+		}
+
 		const pending = this.#pendingRun;
 		if (this.#activeRun) {
 			yield {
@@ -446,18 +631,27 @@ export class NightcodeLLMService implements LLMService {
 			};
 			return;
 		}
+		const recorded = pending.decisions.get(decision.approvalId);
+		if (recorded) {
+			if (!sameApprovalDecision(recorded, decision)) {
+				yield {
+					type: "error",
+					error: `Approval already resolved: ${decision.approvalId}`,
+					code: "APPROVAL_ALREADY_RESOLVED",
+					retryable: false,
+				};
+				return;
+			}
+			yield approvalResponseChunk(recorded);
+			yield { type: "done", finishReason: "approval-recorded" };
+			return;
+		}
 
 		pending.decisions.set(decision.approvalId, decision);
-		yield {
-			type: "approval-response",
-			approval: {
-				id: decision.approvalId,
-				approved: decision.approved,
-				reason: decision.reason,
-			},
-		};
+		this.#rememberApprovalDecision(decision);
 
 		if (pending.decisions.size < pending.approvals.size) {
+			yield approvalResponseChunk(decision);
 			yield { type: "done", finishReason: "approval-required" };
 			return;
 		}
@@ -475,6 +669,7 @@ export class NightcodeLLMService implements LLMService {
 		] as ModelMessage[];
 		this.#activeRun = true;
 		try {
+			yield approvalResponseChunk(decision);
 			yield* this.#execute(continuation, pending.config, {
 				...options,
 				sessionId: options.sessionId ?? pending.sessionId,
@@ -484,11 +679,34 @@ export class NightcodeLLMService implements LLMService {
 		}
 	}
 
+	#rememberApprovalDecision(decision: ApprovalDecision): void {
+		this.#resolvedApprovals.set(decision.approvalId, decision);
+		if (this.#resolvedApprovals.size <= MAX_RESOLVED_APPROVALS) return;
+		const oldest = this.#resolvedApprovals.keys().next().value;
+		if (oldest) this.#resolvedApprovals.delete(oldest);
+	}
+
+	#runWorkspaceMutation<T>(operation: () => Promise<T>, abortSignal?: AbortSignal): Promise<T> {
+		return workspaceMutationCoordinator.run(this.#workspaceRoot, operation, abortSignal);
+	}
+
 	async *#execute(
 		messages: ModelMessage[],
 		config: LLMConfig,
 		options: StreamOptions,
 	): AsyncGenerator<LLMStreamChunk> {
+		const runController = new AbortController();
+		let deadlineReached = false;
+		const forwardAbort = () =>
+			runController.abort(options.abortSignal?.reason ?? new Error("run aborted"));
+		if (options.abortSignal?.aborted) forwardAbort();
+		else options.abortSignal?.addEventListener("abort", forwardAbort, { once: true });
+		const deadline = setTimeout(() => {
+			deadlineReached = true;
+			runController.abort(
+				new Error(`run exceeded ${this.#policy.maxRunDurationMs.toLocaleString()} ms deadline`),
+			);
+		}, this.#policy.maxRunDurationMs);
 		const metadata: RunMetadata = {
 			runId: crypto.randomUUID(),
 			sessionId: options.sessionId ?? crypto.randomUUID(),
@@ -511,24 +729,30 @@ export class NightcodeLLMService implements LLMService {
 
 		let mcp: ConnectedMCPTools | undefined;
 		try {
-			if (getSymbolCount(this.#workspaceRoot) === 0) {
-				await indexDirectory(this.#workspaceRoot).catch((error) =>
-					logger.warn("repository indexing failed", { error: errorMessage(error) }),
-				);
-			}
+			if (runController.signal.aborted) throw runController.signal.reason;
+			await refreshRepositoryIndex(this.#workspaceRoot, {
+				abortSignal: runController.signal,
+			}).catch((error) =>
+				logger.warn("repository indexing failed", { error: errorMessage(error) }),
+			);
 
-			if (config.agentMode) {
+			if (config.agentMode && this.#policy.mode === "BUILD") {
 				mcp = await connectMCPTools(
 					this.#projectConfig.mcpServers,
 					this.#workspaceRoot,
 					this.#disabledTools,
 				);
 				this.#mcpApprovalTools = mcp.approvalTools;
+				for (const warning of mcp.warnings) {
+					logger.warn("MCP connection warning", { warning });
+				}
 			}
-			const agent = this.#createAgent(config, metadata, mcp?.tools);
+			if (runController.signal.aborted) throw runController.signal.reason;
+			const query = latestUserQuery(messages);
+			const agent = this.#createAgent(config, metadata, mcp?.tools, query, mcp?.warnings);
 			const result = await agent.stream({
 				messages,
-				abortSignal: options.abortSignal,
+				abortSignal: runController.signal,
 				onStepFinish: ({ usage, performance, finishReason }) => {
 					logger.debug("agent step", {
 						runId: metadata.runId,
@@ -548,11 +772,16 @@ export class NightcodeLLMService implements LLMService {
 				if (part.type === "tool-approval-request") {
 					const toolCall = isRecord(part.toolCall) ? part.toolCall : {};
 					const id = typeof part.approvalId === "string" ? part.approvalId : crypto.randomUUID();
+					const toolName = typeof toolCall.toolName === "string" ? toolCall.toolName : "unknown";
+					const args = isRecord(toolCall.input) ? toolCall.input : {};
+					const reason = this.#approvalReason(toolName, args, config);
+					if (reason) part.reason = reason;
 					approvals.set(id, {
 						id,
 						toolCallId: typeof toolCall.toolCallId === "string" ? toolCall.toolCallId : "unknown",
-						toolName: typeof toolCall.toolName === "string" ? toolCall.toolName : "unknown",
-						args: isRecord(toolCall.input) ? toolCall.input : {},
+						toolName,
+						args,
+						reason,
 					});
 				}
 				if (part.type === "finish") {
@@ -589,11 +818,17 @@ export class NightcodeLLMService implements LLMService {
 				usage: usageChunk(finishUsage),
 			});
 		} catch (error) {
-			const aborted = options.abortSignal?.aborted;
-			if (aborted) {
+			if (deadlineReached) {
+				yield decorate({
+					type: "error",
+					error: errorMessage(runController.signal.reason ?? error),
+					code: "RUN_TIMEOUT",
+					retryable: true,
+				});
+			} else if (runController.signal.aborted) {
 				yield decorate({
 					type: "aborted",
-					reason: errorMessage(options.abortSignal?.reason ?? error),
+					reason: errorMessage(runController.signal.reason ?? error),
 				});
 			} else {
 				yield decorate({
@@ -607,6 +842,8 @@ export class NightcodeLLMService implements LLMService {
 				});
 			}
 		} finally {
+			clearTimeout(deadline);
+			options.abortSignal?.removeEventListener("abort", forwardAbort);
 			this.#mcpApprovalTools = new Set();
 			await mcp?.close();
 		}
@@ -658,22 +895,31 @@ export class NightcodeLLMService implements LLMService {
 		return undefined;
 	}
 
-	#createAgent(config: LLMConfig, metadata: RunMetadata, mcpTools: ToolSet = {}) {
-		const tools = config.agentMode ? { ...this.#tools(config), ...mcpTools } : {};
+	#createAgent(
+		config: LLMConfig,
+		metadata: RunMetadata,
+		mcpTools: ToolSet = {},
+		query?: string,
+		mcpWarnings: string[] = [],
+	) {
+		const tools =
+			config.agentMode && this.#policy.mode === "BUILD"
+				? { ...this.#tools(config), ...mcpTools }
+				: config.agentMode
+					? this.#tools(config)
+					: {};
 		return new ToolLoopAgent({
 			id: "nightcode-coding-agent",
 			model: this.#getModel(config),
-			instructions: this.#instructionsWithRuntimeContext(config.systemPrompt),
+			instructions: this.#instructionsWithRuntimeContext(config.systemPrompt, query, mcpWarnings),
 			maxOutputTokens: config.maxTokens,
 			temperature: config.temperature,
 			providerOptions: this.#providerOptions(config),
-			stopWhen: config.agentMode
-				? stepCountIs(configuredMaxAgentSteps(this.#projectConfig))
-				: stepCountIs(1),
+			stopWhen: config.agentMode ? stepCountIs(this.#policy.maxAgentSteps) : stepCountIs(1),
 			tools,
-			maxRetries: this.#projectConfig.config.maxRetries ?? 2,
+			maxRetries: this.#policy.maxRetries,
 			prepareStep: () => ({
-				instructions: this.#instructionsWithRuntimeContext(config.systemPrompt),
+				instructions: this.#instructionsWithRuntimeContext(config.systemPrompt, query, mcpWarnings),
 			}),
 			toolApproval: async ({ toolCall }) =>
 				this.#toolApproval(toolCall.toolName, toolCall.input, config),
@@ -704,52 +950,109 @@ export class NightcodeLLMService implements LLMService {
 		});
 	}
 
-	#instructionsWithRuntimeContext(baseInstructions: string | undefined): string | undefined {
+	#instructionsWithRuntimeContext(
+		baseInstructions: string | undefined,
+		query?: string,
+		mcpWarnings: string[] = [],
+	): string | undefined {
 		if (!baseInstructions) return baseInstructions;
 		const sections = [baseInstructions];
 		if (this.#taskPlan.items.length > 0) {
 			sections.push(`Current task plan:\n${formatTaskPlan(this.#taskPlan)}`);
 		}
 		if (getSymbolCount(this.#workspaceRoot) > 0) {
+			sections.push(generateRepomap(this.#policy.contextBudget, this.#workspaceRoot, query));
+		}
+		if (mcpWarnings.length > 0) {
 			sections.push(
-				generateRepomap(
-					Math.min(4_000, this.#projectConfig.config.contextBudget ?? 4_000),
-					this.#workspaceRoot,
-				),
+				`MCP availability warnings:\n${mcpWarnings.map((item) => `- ${item}`).join("\n")}`,
 			);
 		}
 		return sections.join("\n\n");
 	}
 
-	async #toolApproval(toolName: string, input: unknown, config: LLMConfig) {
+	#approvalReason(
+		toolName: string,
+		args: Record<string, unknown>,
+		config: LLMConfig,
+	): string | undefined {
+		if (toolName === "shell") {
+			return assessShellCommand(String(args.command ?? ""), config.approvalMode).reason;
+		}
+		if (
+			SENSITIVE_READ_TOOLS.has(toolName) &&
+			typeof args.path === "string" &&
+			isSensitivePath(args.path)
+		) {
+			return `Read sensitive file: ${args.path}`;
+		}
+		if (toolName.startsWith("mcp_")) return "Invoke a connected MCP server tool.";
+		if (toolName === "undoLastPatch") return "Restore the most recent Night Code checkpoint.";
+		if (toolName === "applyPatch" && Array.isArray(args.operations)) {
+			const deletes = args.operations.filter(
+				(operation) => isRecord(operation) && operation.type === "delete",
+			).length;
+			if (deletes > 0) return `Apply a patch containing ${deletes} delete operation(s).`;
+		}
+		if (MUTATION_TOOLS.has(toolName) && config.approvalMode === "always") {
+			return "Approval mode is set to always for workspace mutations.";
+		}
+		return undefined;
+	}
+
+	async #toolApproval(
+		toolName: string,
+		input: unknown,
+		config: LLMConfig,
+	): Promise<ToolApprovalDecision> {
 		const args = isRecord(input) ? input : {};
 		if (toolName === "shell") {
 			const assessment = assessShellCommand(String(args.command ?? ""), config.approvalMode);
-			if (!assessment.allowed) return { type: "denied" as const, reason: assessment.reason };
-			return assessment.requiresApproval
-				? ({ type: "user-approval" } as const)
-				: ({ type: "approved" } as const);
-		}
-
-		const mutationTools = new Set([
-			"applyPatch",
-			"writeFile",
-			"editFile",
-			"multiEdit",
-			"undoLastPatch",
-		]);
-		if (!mutationTools.has(toolName)) {
-			if (toolName.startsWith("mcp_")) {
-				return this.#mcpApprovalTools.has(toolName)
-					? ({ type: "user-approval" } as const)
-					: ({ type: "approved" } as const);
+			if (this.#policy.denyRiskyTools && assessment.risk !== "low") {
+				return { type: "denied", reason: `Risky shell command denied: ${assessment.reason}` };
 			}
-			return { type: "approved" as const };
+			if (this.#policy.mode === "PLAN" && assessment.risk !== "low") {
+				return {
+					type: "denied",
+					reason: "PLAN mode only permits read-only, low-risk shell commands.",
+				};
+			}
+			return decideToolApproval({
+				kind: "shell",
+				approvalMode: config.approvalMode,
+				assessment,
+			});
 		}
 
-		if (config.approvalMode === "always") return { type: "user-approval" as const };
-		if (config.approvalMode === "never") return { type: "approved" as const };
-		if (toolName === "undoLastPatch") return { type: "user-approval" as const };
+		if (SENSITIVE_READ_TOOLS.has(toolName) && typeof args.path === "string") {
+			const authorized = await this.#boundary.authorize(args.path, "read");
+			if (isSensitivePath(args.path) || isSensitivePath(authorized.canonicalPath)) {
+				return this.#policy.denyRiskyTools || config.approvalMode === "never"
+					? {
+							type: "denied",
+							reason: "Sensitive-file reads require approval, but approval mode is never.",
+						}
+					: { type: "user-approval" };
+			}
+		}
+
+		if (this.#policy.mode === "PLAN" && MUTATION_TOOLS.has(toolName)) {
+			return { type: "denied", reason: "File mutations are disabled in PLAN mode." };
+		}
+
+		if (!MUTATION_TOOLS.has(toolName)) {
+			if (toolName.startsWith("mcp_")) {
+				if (this.#policy.denyRiskyTools && this.#mcpApprovalTools.has(toolName)) {
+					return { type: "denied", reason: "Approval-gated MCP tools are denied by policy." };
+				}
+				return decideToolApproval({
+					kind: "mcp",
+					approvalMode: config.approvalMode,
+					requiresApproval: this.#mcpApprovalTools.has(toolName),
+				});
+			}
+			return decideToolApproval({ kind: "other", approvalMode: config.approvalMode });
+		}
 
 		const paths: Array<{ path: string; delete?: boolean }> = [];
 		if (typeof args.path === "string") paths.push({ path: args.path });
@@ -760,18 +1063,30 @@ export class NightcodeLLMService implements LLMService {
 				}
 			}
 		}
-		if (paths.some((path) => path.delete)) return { type: "user-approval" as const };
+		let external = false;
 		for (const path of paths) {
 			const authorized = await this.#boundary.authorize(path.path, "write");
-			if (authorized.external) return { type: "user-approval" as const };
+			if (authorized.external) external = true;
 		}
-		return { type: "approved" as const };
+		const highRisk = paths.some((path) => path.delete) || external || toolName === "undoLastPatch";
+		if (this.#policy.denyRiskyTools && highRisk) {
+			return {
+				type: "denied",
+				reason: "Delete, undo, and external mutations are denied by policy.",
+			};
+		}
+		return decideToolApproval({
+			kind: "mutation",
+			approvalMode: config.approvalMode,
+			deletes: paths.some((path) => path.delete),
+			external,
+			undo: toolName === "undoLastPatch",
+		});
 	}
 
 	#tools(config: LLMConfig) {
-		const maxOutputChars =
-			this.#projectConfig.config.maxToolOutputChars ?? DEFAULT_MAX_TOOL_OUTPUT_CHARS;
-		const maxTimeoutMs = this.#projectConfig.config.maxToolTimeoutMs ?? DEFAULT_MAX_TOOL_TIMEOUT_MS;
+		const maxOutputChars = this.#policy.maxToolOutputChars;
+		const maxTimeoutMs = this.#policy.maxToolTimeoutMs;
 		const trim = (output: string, limit = maxOutputChars) =>
 			output.length <= limit
 				? output
@@ -782,8 +1097,7 @@ export class NightcodeLLMService implements LLMService {
 			await Promise.all(snapshots.map((snapshot) => indexFile(snapshot.path, this.#workspaceRoot)));
 		};
 		const ensurePlannedMutation = () => {
-			if (this.#projectConfig.config.requirePlanForEdits === false) return;
-			if (this.#disabledTools.has("updateTaskPlan")) return;
+			if (!this.#policy.requirePlanForEdits) return;
 			if (this.#taskPlan.items.filter((item) => item.status === "in_progress").length === 1) return;
 			throw new Error(
 				"File mutation blocked: updateTaskPlan must contain exactly one in_progress item.",
@@ -828,25 +1142,33 @@ export class NightcodeLLMService implements LLMService {
 				execute: async ({ command, cwd, timeoutMs }, { abortSignal }) => {
 					const assessment = assessShellCommand(command, config.approvalMode);
 					if (!assessment.allowed) throw new Error(`Shell command denied: ${assessment.reason}`);
+					if (this.#policy.denyRiskyTools && assessment.risk !== "low") {
+						throw new Error(`Shell command denied by non-interactive policy: ${assessment.reason}`);
+					}
+					if (this.#policy.mode === "PLAN" && assessment.risk !== "low") {
+						throw new Error("Shell command denied: PLAN mode only permits low-risk reads.");
+					}
 					if (assessment.risk !== "low") ensurePlannedMutation();
 					const authorized = await authorize(cwd, "directory");
-					return runShellCommand({
-						command,
-						cwd: authorized.canonicalPath,
-						workspaceRoot: this.#workspaceRoot,
-						timeoutMs,
-						maxOutputChars,
-						abortSignal,
-					});
+					const run = () =>
+						runShellCommand({
+							command,
+							cwd: authorized.canonicalPath,
+							workspaceRoot: this.#workspaceRoot,
+							timeoutMs,
+							maxOutputChars,
+							abortSignal,
+						});
+					return assessment.risk === "low" ? run() : this.#runWorkspaceMutation(run, abortSignal);
 				},
 			}),
 			readFile: tool({
 				description:
-					"Read a bounded UTF-8 text file after canonical workspace authorization. Use readLines when only a section is needed.",
+					"Read a bounded UTF-8 text prefix after canonical workspace authorization. Sensitive credential files require approval. Use readLines when only a section is needed.",
 				inputSchema: z.object({ path: z.string().min(1) }),
 				execute: async ({ path }) => {
 					const file = await authorize(path);
-					return trim(await Bun.file(file.canonicalPath).text());
+					return readTextPrefix(file.canonicalPath, maxOutputChars);
 				},
 			}),
 			readLines: tool({
@@ -857,45 +1179,41 @@ export class NightcodeLLMService implements LLMService {
 					startLine: z.number().int().positive(),
 					endLine: z.number().int().positive(),
 				}),
-				execute: async ({ path, startLine, endLine }) => {
+				execute: async ({ path, startLine, endLine }, { abortSignal }) => {
 					if (endLine < startLine) throw new Error("endLine must be >= startLine");
 					if (endLine - startLine > 10_000) throw new Error("line range is too large");
 					const file = await authorize(path);
-					const lines = (await Bun.file(file.canonicalPath).text()).split(/\r?\n/);
-					return trim(
-						lines
-							.slice(startLine - 1, endLine)
-							.map((line, index) => `${startLine + index}: ${line}`)
-							.join("\n"),
-					);
+					return readLineRange(file.canonicalPath, startLine, endLine, maxOutputChars, abortSignal);
 				},
 			}),
 			applyPatch: tool({
 				description:
 					"Apply an atomic structured patch. All operations are validated before mutation; the complete batch is rolled back if any write fails. Use expectedSha256 after reading a file when concurrent changes are possible. Delete operations require approval by default.",
 				inputSchema: structuredPatchSchema,
-				execute: async ({ operations }) => {
-					ensurePlannedMutation();
-					const result = await applyStructuredPatch(this.#boundary, operations);
-					this.#changeHistory.push(result.snapshots);
-					await refreshIndex(result.snapshots);
-					return result.summary;
-				},
+				execute: async ({ operations }, { abortSignal }) =>
+					this.#runWorkspaceMutation(async () => {
+						ensurePlannedMutation();
+						const result = await applyStructuredPatch(this.#boundary, operations);
+						this.#changeHistory.push(result.snapshots);
+						await refreshIndex(result.snapshots);
+						return result.summary;
+					}, abortSignal),
 			}),
 			writeFile: tool({
 				description:
 					"Atomically write one UTF-8 file in an authorized root. Prefer applyPatch for reviewed multi-file work.",
 				inputSchema: z.object({ path: z.string().min(1), content: z.string().max(2_000_000) }),
-				execute: async ({ path, content }) => {
-					ensurePlannedMutation();
-					const file = await authorize(path, "write");
-					const before = file.exists ? await Bun.file(file.canonicalPath).text() : null;
-					await atomicWriteFile(file.canonicalPath, content);
-					const snapshots = [{ path: file.canonicalPath, before, after: content }];
-					this.#changeHistory.push(snapshots);
-					await refreshIndex(snapshots);
-					return `wrote ${file.canonicalPath} (sha256 ${sha256(content)})`;
-				},
+				execute: async ({ path, content }, { abortSignal }) =>
+					this.#runWorkspaceMutation(async () => {
+						ensurePlannedMutation();
+						const file = await authorize(path, "write");
+						const before = file.exists ? await Bun.file(file.canonicalPath).text() : null;
+						await atomicWriteFile(file.canonicalPath, content);
+						const snapshots = [{ path: file.canonicalPath, before, after: content }];
+						this.#changeHistory.push(snapshots);
+						await refreshIndex(snapshots);
+						return `wrote ${file.canonicalPath} (sha256 ${sha256(content)})`;
+					}, abortSignal),
 			}),
 			editFile: tool({
 				description:
@@ -905,15 +1223,16 @@ export class NightcodeLLMService implements LLMService {
 					oldText: z.string().min(1),
 					newText: z.string(),
 				}),
-				execute: async ({ path, oldText, newText }) => {
-					ensurePlannedMutation();
-					const result = await applyStructuredPatch(this.#boundary, [
-						patchOperationSchema.parse({ type: "replace", path, oldText, newText }),
-					]);
-					this.#changeHistory.push(result.snapshots);
-					await refreshIndex(result.snapshots);
-					return result.summary;
-				},
+				execute: async ({ path, oldText, newText }, { abortSignal }) =>
+					this.#runWorkspaceMutation(async () => {
+						ensurePlannedMutation();
+						const result = await applyStructuredPatch(this.#boundary, [
+							patchOperationSchema.parse({ type: "replace", path, oldText, newText }),
+						]);
+						this.#changeHistory.push(result.snapshots);
+						await refreshIndex(result.snapshots);
+						return result.summary;
+					}, abortSignal),
 			}),
 			multiEdit: tool({
 				description:
@@ -925,38 +1244,49 @@ export class NightcodeLLMService implements LLMService {
 						.min(1)
 						.max(100),
 				}),
-				execute: async ({ path, edits }) => {
-					ensurePlannedMutation();
-					const file = await authorize(path);
-					const before = await Bun.file(file.canonicalPath).text();
-					let after = before;
-					for (const edit of edits) {
-						const count = after.split(edit.oldText).length - 1;
-						if (count !== 1) throw new Error(`oldText matched ${count} times in ${path}`);
-						after = after.replace(edit.oldText, edit.newText);
-					}
-					await atomicWriteFile(file.canonicalPath, after);
-					const snapshots = [{ path: file.canonicalPath, before, after }];
-					this.#changeHistory.push(snapshots);
-					await refreshIndex(snapshots);
-					return `applied ${edits.length} edits to ${file.canonicalPath}`;
-				},
+				execute: async ({ path, edits }, { abortSignal }) =>
+					this.#runWorkspaceMutation(async () => {
+						ensurePlannedMutation();
+						const file = await authorize(path);
+						const before = await Bun.file(file.canonicalPath).text();
+						let after = before;
+						for (const edit of edits) {
+							const count = after.split(edit.oldText).length - 1;
+							if (count !== 1) throw new Error(`oldText matched ${count} times in ${path}`);
+							after = after.replace(edit.oldText, edit.newText);
+						}
+						await atomicWriteFile(file.canonicalPath, after);
+						const snapshots = [{ path: file.canonicalPath, before, after }];
+						this.#changeHistory.push(snapshots);
+						await refreshIndex(snapshots);
+						return `applied ${edits.length} edits to ${file.canonicalPath}`;
+					}, abortSignal),
 			}),
 			undoLastPatch: tool({
 				description:
 					"Restore the exact files changed by Night Code's most recent patch checkpoint. Requires approval and never resets unrelated user changes.",
 				inputSchema: z.object({}),
-				execute: async () => this.undoLastPatch(),
+				execute: async (_input, { abortSignal }) => this.undoLastPatch(abortSignal),
 			}),
 			listFiles: tool({
 				description:
 					"List immediate files and directories in an authorized directory. Symlinks that escape allowed roots are omitted.",
 				inputSchema: z.object({ path: z.string().default(".") }),
-				execute: async ({ path }) => {
+				execute: async ({ path }, { abortSignal }) => {
 					const directory = await authorize(path, "directory");
-					const entries = await readdir(directory.canonicalPath, { withFileTypes: true });
+					const entries = [];
+					let truncated = false;
+					for await (const entry of await opendir(directory.canonicalPath)) {
+						if (abortSignal?.aborted) throw abortSignal.reason ?? new Error("listing aborted");
+						if (entries.length >= 2_000) {
+							truncated = true;
+							break;
+						}
+						entries.push(entry);
+					}
 					const rows: string[] = [];
 					for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+						if (abortSignal?.aborted) throw abortSignal.reason ?? new Error("listing aborted");
 						try {
 							const authorized = await authorize(resolve(directory.canonicalPath, entry.name));
 							const info = await lstat(authorized.canonicalPath);
@@ -966,6 +1296,7 @@ export class NightcodeLLMService implements LLMService {
 							rows.push(`skip ${"".padStart(10)} ${entry.name} [outside allowed roots]`);
 						}
 					}
+					if (truncated) rows.push("[truncated after 2,000 entries]");
 					return trim(rows.join("\n"));
 				},
 			}),
@@ -973,7 +1304,7 @@ export class NightcodeLLMService implements LLMService {
 				description:
 					"Return canonical path, type, size, modification time, and SHA-256 for an authorized path.",
 				inputSchema: z.object({ path: z.string().min(1) }),
-				execute: async ({ path }) => {
+				execute: async ({ path }, { abortSignal }) => {
 					const file = await authorize(path);
 					const info = await stat(file.canonicalPath);
 					return {
@@ -981,7 +1312,7 @@ export class NightcodeLLMService implements LLMService {
 						size: info.size,
 						type: info.isDirectory() ? "directory" : "file",
 						modifiedAt: info.mtime.toISOString(),
-						sha256: info.isFile() ? sha256(await Bun.file(file.canonicalPath).text()) : undefined,
+						sha256: info.isFile() ? await sha256File(file.canonicalPath, abortSignal) : undefined,
 					};
 				},
 			}),
@@ -993,11 +1324,14 @@ export class NightcodeLLMService implements LLMService {
 					cwd: z.string().default("."),
 					limit: z.number().int().positive().max(1_000).default(200),
 				}),
-				execute: async ({ pattern, cwd, limit }) => {
+				execute: async ({ pattern, cwd, limit }, { abortSignal }) => {
 					const directory = await authorize(cwd, "directory");
 					const glob = new Bun.Glob(pattern);
 					const matches: string[] = [];
+					let scanned = 0;
 					for await (const match of glob.scan({ cwd: directory.canonicalPath, onlyFiles: true })) {
+						if (abortSignal?.aborted) throw abortSignal.reason ?? new Error("glob aborted");
+						if (scanned++ >= 5_000) break;
 						try {
 							await authorize(resolve(directory.canonicalPath, match));
 							matches.push(match.replace(/\\/g, "/"));
@@ -1009,21 +1343,36 @@ export class NightcodeLLMService implements LLMService {
 			}),
 			grep: tool({
 				description:
-					"Search bounded UTF-8 files with a JavaScript regular expression. Returns relative path:line:content. Prefer literal, narrow patterns and a focused include glob.",
+					"Search bounded UTF-8 source files with deterministic case-insensitive literal matching. Sensitive and generated paths are skipped.",
 				inputSchema: z.object({
 					pattern: z.string().min(1).max(500),
 					cwd: z.string().default("."),
 					include: z.string().max(500).default("**/*.{ts,tsx,js,jsx,json,md,css,html}"),
 					limit: z.number().int().positive().max(1_000).default(200),
 				}),
-				execute: async ({ pattern, cwd, include, limit }) => {
+				execute: async ({ pattern, cwd, include, limit }, { abortSignal }) => {
 					const directory = await authorize(cwd, "directory");
-					const regex = new RegExp(pattern, "i");
+					const literal = pattern.toLowerCase();
 					const glob = new Bun.Glob(include);
 					const results: string[] = [];
+					const excluded = new Set([
+						".git",
+						".next",
+						".cache",
+						".bun",
+						"coverage",
+						"dist",
+						"node_modules",
+					]);
+					let filesScanned = 0;
 					for await (const match of glob.scan({ cwd: directory.canonicalPath, onlyFiles: true })) {
+						if (abortSignal?.aborted) throw abortSignal.reason ?? new Error("search aborted");
+						if (filesScanned++ >= 5_000) break;
+						const normalizedMatch = match.replace(/\\/g, "/");
+						if (normalizedMatch.split("/").some((segment) => excluded.has(segment))) continue;
 						try {
 							const filePath = await authorize(resolve(directory.canonicalPath, match));
+							if (isSensitivePath(match) || isSensitivePath(filePath.canonicalPath)) continue;
 							const file = Bun.file(filePath.canonicalPath);
 							if (file.size > 1_000_000) continue;
 							const content = await file.text();
@@ -1031,14 +1380,45 @@ export class NightcodeLLMService implements LLMService {
 							const lines = content.split(/\r?\n/);
 							for (let index = 0; index < lines.length; index++) {
 								const line = lines[index] ?? "";
-								if (!regex.test(line)) continue;
-								results.push(`${match.replace(/\\/g, "/")}:${index + 1}:${line}`);
+								if (line.length > 50_000) continue;
+								if (!line.toLowerCase().includes(literal)) continue;
+								results.push(`${normalizedMatch}:${index + 1}:${line}`);
 								if (results.length >= limit) return trim(results.join("\n"));
 							}
 						} catch {}
 					}
 					return trim(results.join("\n"));
 				},
+			}),
+			searchSymbols: tool({
+				description:
+					"Search the incrementally refreshed repository symbol index by name. Returns compact relative locations before opening files.",
+				inputSchema: z.object({
+					query: z.string().min(1).max(200),
+					kind: z
+						.enum([
+							"function",
+							"class",
+							"type",
+							"interface",
+							"variable",
+							"method",
+							"import",
+							"export",
+						])
+						.optional(),
+					limit: z.number().int().positive().max(200).default(50),
+				}),
+				execute: async ({ query, kind, limit }) =>
+					findSymbols(query, kind as CodeSymbol["kind"] | undefined, this.#workspaceRoot)
+						.slice(0, limit)
+						.map((symbol) => ({
+							name: symbol.name,
+							kind: symbol.kind,
+							path: relative(this.#workspaceRoot, symbol.file).replace(/\\/g, "/"),
+							line: symbol.startLine,
+							signature: symbol.signature,
+						})),
 			}),
 			listAgentProfiles: tool({
 				description:
@@ -1072,7 +1452,11 @@ export class NightcodeLLMService implements LLMService {
 		};
 
 		return Object.fromEntries(
-			Object.entries(tools).filter(([toolName]) => !this.#disabledTools.has(toolName)),
+			Object.entries(tools).filter(
+				([toolName]) =>
+					!this.#disabledTools.has(toolName) &&
+					(this.#policy.mode !== "PLAN" || !MUTATION_TOOLS.has(toolName)),
+			),
 		);
 	}
 
@@ -1113,6 +1497,7 @@ export class NightcodeLLMService implements LLMService {
 						toolCallId: typeof toolCall.toolCallId === "string" ? toolCall.toolCallId : "unknown",
 						toolName: typeof toolCall.toolName === "string" ? toolCall.toolName : "unknown",
 						args: isRecord(toolCall.input) ? toolCall.input : {},
+						reason: typeof part.reason === "string" ? part.reason : undefined,
 					},
 				};
 			}

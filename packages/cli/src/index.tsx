@@ -4,7 +4,7 @@ import type { CommandContext } from "@cli/components/command-menu/types";
 import { ConversationPane } from "@cli/components/conversation-pane";
 import { Header } from "@cli/components/header";
 import { InputBar } from "@cli/components/input-bar";
-import { gracefulExit, setRenderer } from "@cli/services/lifecycle";
+import { gracefulExit, setBeforeExit, setRenderer } from "@cli/services/lifecycle";
 import {
 	type LLMMessage,
 	type LLMProvider,
@@ -25,12 +25,17 @@ import {
 	applyInitialWorkspace,
 	compatibleModelForProvider,
 	isDoctorCommand,
+	isHelpCommand,
 	isUiSmokeCommand,
+	isVersionCommand,
+	printCliHelp,
+	printCliVersion,
 	resolveStartupState,
 	runDoctor,
 	uiSmokeMs,
+	validateCliArguments,
 } from "@cli/services/startup";
-import type { ToolActivity } from "@cli/services/tool-activity";
+import { completeToolActivity, type ToolActivity } from "@cli/services/tool-activity";
 import { parseSlashCommand, resolveUserPath } from "@cli/slash-commands";
 import { discoverAgentProfiles } from "@nightcode/server/lib/agent-profiles";
 import {
@@ -47,7 +52,12 @@ import {
 	getProviderForModel,
 	supportedChatModels,
 } from "@nightcode/shared";
-import { createCliRenderer, type ScrollBoxRenderable } from "@opentui/core";
+import {
+	type CliRenderer,
+	createCliRenderer,
+	type KeyEvent,
+	type ScrollBoxRenderable,
+} from "@opentui/core";
 import { createRoot } from "@opentui/react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
@@ -69,10 +79,12 @@ function App({
 	initialWorkspaceRoot,
 	initialWorkspaceWarning,
 	initialSession,
+	renderer,
 }: {
 	initialWorkspaceRoot: string;
 	initialWorkspaceWarning?: string;
 	initialSession?: StoredSession;
+	renderer: CliRenderer;
 }) {
 	const [messages, setMessages] = useState<LLMMessage[]>(() =>
 		initialSession
@@ -111,6 +123,35 @@ function App({
 	const scrollRef = useRef<ScrollBoxRenderable | null>(null);
 	const messageKeysRef = useRef(new WeakMap<LLMMessage, string>());
 	const activeAbortControllerRef = useRef<AbortController | null>(null);
+	const saveErrorShownRef = useRef(false);
+	const sessionSnapshotRef = useRef<StoredSession>({
+		id: sessionId,
+		title: titleFromMessages(messages),
+		cwd: workspaceRoot,
+		createdAt: sessionCreatedAt,
+		updatedAt: Date.now(),
+		messages,
+		fileContext: Array.from(fileContext.entries()).map(([path, content]) => ({ path, content })),
+	});
+	sessionSnapshotRef.current = {
+		id: sessionId,
+		title: titleFromMessages(messages),
+		cwd: workspaceRoot,
+		createdAt: sessionCreatedAt,
+		updatedAt: Date.now(),
+		messages,
+		fileContext: Array.from(fileContext.entries()).map(([path, content]) => ({ path, content })),
+	};
+
+	const persistCurrentSession = useCallback(
+		async (overrides: Partial<Pick<StoredSession, "messages" | "fileContext">> = {}) => {
+			const snapshot = { ...sessionSnapshotRef.current, ...overrides, updatedAt: Date.now() };
+			snapshot.title = titleFromMessages(snapshot.messages);
+			await saveStoredSession(snapshot);
+			saveErrorShownRef.current = false;
+		},
+		[],
+	);
 
 	// biome-ignore lint/correctness/useExhaustiveDependencies: scroll on any content change
 	useEffect(() => {
@@ -121,22 +162,21 @@ function App({
 		if (messages.length === 0 && fileContext.size === 0) return;
 
 		const timeout = setTimeout(() => {
-			void saveStoredSession({
-				id: sessionId,
-				title: titleFromMessages(messages),
-				cwd: workspaceRoot,
-				createdAt: sessionCreatedAt,
-				updatedAt: Date.now(),
-				messages,
-				fileContext: Array.from(fileContext.entries()).map(([path, content]) => ({
-					path,
-					content,
-				})),
+			void persistCurrentSession().catch((error) => {
+				if (saveErrorShownRef.current) return;
+				saveErrorShownRef.current = true;
+				setMessages((previous) => [
+					...previous,
+					{
+						role: "notice",
+						content: `Session save failed: ${error instanceof Error ? error.message : String(error)}`,
+					},
+				]);
 			});
 		}, 300);
 
 		return () => clearTimeout(timeout);
-	}, [fileContext, messages, sessionCreatedAt, sessionId, workspaceRoot]);
+	}, [fileContext, messages, persistCurrentSession]);
 
 	const systemMessage = useCallback(
 		(content: string) => setMessages((prev) => [...prev, { role: "notice", content }]),
@@ -149,6 +189,28 @@ function App({
 		}
 	}, [initialWorkspaceWarning, systemMessage]);
 
+	useEffect(() => {
+		setBeforeExit(persistCurrentSession);
+		return () => setBeforeExit(null);
+	}, [persistCurrentSession]);
+
+	useEffect(() => {
+		const handleKeypress = (event: KeyEvent) => {
+			if (!event.ctrl || event.name !== "c") return;
+			event.preventDefault();
+			event.stopPropagation();
+			if (activeAbortControllerRef.current) {
+				activeAbortControllerRef.current.abort("cancelled by user");
+				return;
+			}
+			void gracefulExit();
+		};
+		renderer.keyInput.on("keypress", handleKeypress);
+		return () => {
+			renderer.keyInput.off("keypress", handleKeypress);
+		};
+	}, [renderer]);
+
 	const getMessageKey = useCallback((message: LLMMessage) => {
 		const existing = messageKeysRef.current.get(message);
 		if (existing) return existing;
@@ -158,24 +220,29 @@ function App({
 		return next;
 	}, []);
 
-	const clearMessages = useCallback(() => {
+	const clearMessages = useCallback(async () => {
+		await persistCurrentSession({ messages: [] });
 		setMessages([]);
 		setStreamingText("");
-	}, []);
+		setToolActivities([]);
+	}, [persistCurrentSession]);
 
-	const newConversation = useCallback(() => {
+	const newConversation = useCallback(async () => {
+		await persistCurrentSession();
 		llm.setWorkspace(workspaceRoot);
 		setSessionId(createSessionId());
 		setSessionCreatedAt(Date.now());
 		setMessages([{ role: "notice", content: "Started a new conversation." }]);
 		setStreamingText("");
+		setToolActivities([]);
 		setPendingApprovals([]);
 		setTokenUsage({ input: 0, output: 0 });
 		setSessionStats({ startedAt: Date.now(), requests: 0, toolCalls: 0 });
-	}, [workspaceRoot]);
+	}, [persistCurrentSession, workspaceRoot]);
 
 	const switchWorkspace = useCallback(
 		async (path: string, options: WorkspaceSwitchOptions = {}) => {
+			await persistCurrentSession();
 			const resolved = resolveUserPath(path);
 			const info = await stat(resolved);
 			if (!info.isDirectory()) {
@@ -218,7 +285,7 @@ function App({
 
 			return process.cwd();
 		},
-		[systemMessage],
+		[persistCurrentSession, systemMessage],
 	);
 
 	const showHelp = useCallback(() => {
@@ -693,6 +760,7 @@ function App({
 							id: chunk.toolCall.id ?? crypto.randomUUID(),
 							name: chunk.toolCall.name,
 							args: chunk.toolCall.args,
+							status: "pending",
 							startedAt: Date.now(),
 						},
 					]);
@@ -709,11 +777,10 @@ function App({
 						if (index < 0) return prev;
 						return prev.map((activity, activityIndex) =>
 							activityIndex === index
-								? {
-										...activity,
+								? completeToolActivity(activity, {
 										result: chunk.toolResult.result,
-										durationMs: Date.now() - activity.startedAt,
-									}
+										isError: chunk.toolResult.isError,
+									})
 								: activity,
 						);
 					});
@@ -724,14 +791,6 @@ function App({
 						...prev.filter((approval) => approval.id !== chunk.approval.id),
 						chunk.approval,
 					]);
-					systemMessage(
-						[
-							`Approval required: ${chunk.approval.toolName}`,
-							`ID: ${chunk.approval.id}`,
-							`Arguments: ${JSON.stringify(chunk.approval.args)}`,
-							`Use /approve ${chunk.approval.id} or /deny ${chunk.approval.id}`,
-						].join("\n"),
-					);
 					break;
 
 				case "approval-response":
@@ -769,12 +828,7 @@ function App({
 			return;
 		}
 		systemMessage(
-			[
-				"─── Pending Approvals ───",
-				...approvals.map(
-					(approval) => `  ${approval.id}  ${approval.toolName}  ${JSON.stringify(approval.args)}`,
-				),
-			].join("\n"),
+			`${approvals.length} tool action${approvals.length === 1 ? " is" : "s are"} waiting. Review the approval card below.`,
 		);
 	}, [systemMessage]);
 
@@ -825,7 +879,6 @@ function App({
 			activeAbortControllerRef.current = null;
 			setIsLoading(false);
 			setStreamingText("");
-			setToolActivities([]);
 		}
 	}
 
@@ -1047,7 +1100,6 @@ function App({
 			activeAbortControllerRef.current = null;
 			setIsLoading(false);
 			setStreamingText("");
-			setToolActivities([]);
 		}
 	}
 
@@ -1090,6 +1142,15 @@ function App({
 }
 
 async function main(): Promise<void> {
+	validateCliArguments();
+	if (isHelpCommand()) {
+		printCliHelp();
+		return;
+	}
+	if (isVersionCommand()) {
+		printCliVersion();
+		return;
+	}
 	const initialWorkspace = await applyInitialWorkspace();
 	const startup = await resolveStartupState(initialWorkspace);
 	if (isDoctorCommand()) {
@@ -1097,13 +1158,14 @@ async function main(): Promise<void> {
 		process.exit(0);
 	}
 
-	const renderer = await createCliRenderer();
+	const renderer = await createCliRenderer({ exitOnCtrlC: false });
 	setRenderer(renderer);
 	createRoot(renderer).render(
 		<App
 			initialWorkspaceRoot={startup.workspace.root}
 			initialWorkspaceWarning={startup.warning}
 			initialSession={startup.session}
+			renderer={renderer}
 		/>,
 	);
 

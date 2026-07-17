@@ -1,3 +1,5 @@
+import { describe, expect, test } from "bun:test";
+import { resolve } from "node:path";
 import { COMMANDS } from "@cli/components/command-menu/commands";
 import {
 	expandHomePath,
@@ -5,8 +7,6 @@ import {
 	resolveUserPath,
 	stripEnclosingQuotes,
 } from "@cli/slash-commands";
-import { describe, expect, test } from "bun:test";
-import { resolve } from "node:path";
 
 describe("slash command metadata", () => {
 	test("command names and values are unique and aligned", () => {

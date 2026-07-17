@@ -61,13 +61,15 @@ export function useCommandMenu(): UseCommandMenuReturn {
 	);
 
 	useKeyboard((key) => {
-		if (!showCommandMenu || filteredCommands.length === 0) return;
+		if (!showCommandMenu) return;
 
 		if (key.name === "escape") {
 			key.preventDefault();
 			setShowCommandMenu(false);
 			return;
 		}
+
+		if (filteredCommands.length === 0) return;
 
 		if (key.name === "down" || (key.name === "tab" && !key.shift)) {
 			key.preventDefault();

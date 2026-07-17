@@ -1,5 +1,6 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
+import { readContainedProjectFile, resolveContainedProjectDirectory } from "./project-files";
 
 export interface AgentSkill {
 	id: string;
@@ -11,17 +12,20 @@ export interface AgentSkill {
 
 const SKILL_FILE = "SKILL.md";
 const MAX_SKILL_BYTES = 80_000;
+const MAX_SKILLS_PER_ROOT = 100;
 
 function homeDir(): string | undefined {
 	return process.env.HOME ?? process.env.USERPROFILE;
 }
 
-function skillRoots(rootDir = process.cwd()): Array<{ path: string; scope: AgentSkill["scope"] }> {
+type SkillRoot = { path: string; scope: AgentSkill["scope"]; projectRoot?: string };
+
+function skillRoots(rootDir = process.cwd()): SkillRoot[] {
 	const home = homeDir();
 	return [
-		{ path: join(rootDir, ".nightcode", "skills"), scope: "project" },
-		{ path: join(rootDir, ".agents", "skills"), scope: "project" },
-		{ path: join(rootDir, ".github", "skills"), scope: "project" },
+		{ path: join(rootDir, ".nightcode", "skills"), scope: "project", projectRoot: rootDir },
+		{ path: join(rootDir, ".agents", "skills"), scope: "project", projectRoot: rootDir },
+		{ path: join(rootDir, ".github", "skills"), scope: "project", projectRoot: rootDir },
 		...(home
 			? [
 					{ path: join(home, ".nightcode", "skills"), scope: "global" as const },
@@ -31,8 +35,9 @@ function skillRoots(rootDir = process.cwd()): Array<{ path: string; scope: Agent
 	];
 }
 
-function safeRead(path: string): string | null {
+function safeRead(path: string, projectRoot?: string): string | null {
 	try {
+		if (projectRoot) return readContainedProjectFile(projectRoot, path, MAX_SKILL_BYTES);
 		const file = Bun.file(path);
 		if (file.size > MAX_SKILL_BYTES) {
 			return readFileSync(path, "utf8").slice(0, MAX_SKILL_BYTES);
@@ -50,8 +55,12 @@ function slug(value: string): string {
 		.replace(/^-+|-+$/g, "");
 }
 
-function parseSkill(path: string, scope: AgentSkill["scope"]): AgentSkill | null {
-	const content = safeRead(join(path, SKILL_FILE));
+function parseSkill(
+	path: string,
+	scope: AgentSkill["scope"],
+	projectRoot?: string,
+): AgentSkill | null {
+	const content = safeRead(join(path, SKILL_FILE), projectRoot);
 	if (!content) return null;
 
 	const heading = content.match(/^#\s+(.+)$/m)?.[1]?.trim();
@@ -79,17 +88,29 @@ export function discoverSkills(rootDir = process.cwd()): AgentSkill[] {
 	for (const root of skillRoots(rootDir)) {
 		if (!existsSync(root.path)) continue;
 
-		for (const entry of readdirSync(root.path)) {
-			const skillDir = join(root.path, entry);
+		let directory: string;
+		try {
+			directory = root.projectRoot
+				? resolveContainedProjectDirectory(root.projectRoot, root.path)
+				: root.path;
+		} catch {
+			continue;
+		}
+
+		for (const entry of readdirSync(directory).slice(0, MAX_SKILLS_PER_ROOT)) {
+			let skillDir = join(directory, entry);
 			try {
 				if (!statSync(skillDir).isDirectory()) continue;
+				if (root.projectRoot) {
+					skillDir = resolveContainedProjectDirectory(root.projectRoot, skillDir);
+				}
 			} catch {
 				continue;
 			}
 
 			if (!existsSync(join(skillDir, SKILL_FILE))) continue;
 
-			const skill = parseSkill(skillDir, root.scope);
+			const skill = parseSkill(skillDir, root.scope, root.projectRoot);
 			if (!skill) continue;
 
 			const key = skills.has(skill.id) ? `${skill.id}-${skill.scope}` : skill.id;
@@ -123,7 +144,10 @@ export function loadSkill(skillId: string, rootDir = process.cwd()): string {
 		throw new Error(`Skill not found: ${skillId}`);
 	}
 
-	const content = safeRead(join(skill.path, SKILL_FILE));
+	const content = safeRead(
+		join(skill.path, SKILL_FILE),
+		skill.scope === "project" ? rootDir : undefined,
+	);
 	if (!content) {
 		throw new Error(`Unable to read skill: ${skillId}`);
 	}

@@ -1,5 +1,6 @@
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
+import { readContainedProjectFile, resolveContainedProjectDirectory } from "./project-files";
 
 export interface AgentProfile {
 	id: string;
@@ -11,6 +12,8 @@ export interface AgentProfile {
 
 const PROJECT_AGENT_DIRS = [".github/agents", ".nightcode/agents", ".agents"];
 const GLOBAL_AGENT_DIRS = [".nightcode/agents", ".agents"];
+const MAX_PROFILE_BYTES = 80_000;
+const MAX_PROFILES_PER_DIRECTORY = 100;
 
 function homeDir(): string | null {
 	return process.env.HOME ?? process.env.USERPROFILE ?? null;
@@ -55,18 +58,31 @@ function parseFrontmatter(content: string): Record<string, string> {
 	return parsed;
 }
 
-function readProfile(path: string, scope: AgentProfile["scope"]): AgentProfile | null {
+function readProfile(
+	path: string,
+	scope: AgentProfile["scope"],
+	projectRoot?: string,
+): AgentProfile | null {
 	try {
-		const content = readFileSync(path, "utf8");
+		const content = projectRoot
+			? readContainedProjectFile(projectRoot, path, MAX_PROFILE_BYTES)
+			: statSync(path).size <= MAX_PROFILE_BYTES
+				? readFileSync(path, "utf8")
+				: null;
+		if (content === null) return null;
 		const frontmatter = parseFrontmatter(content);
 		const fallbackName = firstMeaningfulLine(content) ?? basename(path);
-		const id = normalizeId(frontmatter.name ?? basename(path));
+		const name = (frontmatter.name ?? fallbackName).slice(0, 160);
+		const id = normalizeId(frontmatter.name ?? basename(path)).slice(0, 80);
 
 		return {
 			id,
-			name: frontmatter.name ?? fallbackName,
-			description:
-				frontmatter.description ?? firstMeaningfulLine(content) ?? "Custom agent profile",
+			name,
+			description: (
+				frontmatter.description ??
+				firstMeaningfulLine(content) ??
+				"Custom agent profile"
+			).slice(0, 400),
 			path,
 			scope,
 		};
@@ -75,14 +91,20 @@ function readProfile(path: string, scope: AgentProfile["scope"]): AgentProfile |
 	}
 }
 
-function discoverInDirectory(dir: string, scope: AgentProfile["scope"]): AgentProfile[] {
+function discoverInDirectory(
+	dir: string,
+	scope: AgentProfile["scope"],
+	projectRoot?: string,
+): AgentProfile[] {
 	if (!existsSync(dir)) return [];
 
 	try {
-		return readdirSync(dir)
+		const directory = projectRoot ? resolveContainedProjectDirectory(projectRoot, dir) : dir;
+		return readdirSync(directory)
 			.filter((file) => file.endsWith(".md"))
 			.sort()
-			.map((file) => readProfile(join(dir, file), scope))
+			.slice(0, MAX_PROFILES_PER_DIRECTORY)
+			.map((file) => readProfile(join(directory, file), scope, projectRoot))
 			.filter((profile): profile is AgentProfile => profile !== null);
 	} catch {
 		return [];
@@ -91,7 +113,7 @@ function discoverInDirectory(dir: string, scope: AgentProfile["scope"]): AgentPr
 
 export function discoverAgentProfiles(rootDir = process.cwd()): AgentProfile[] {
 	const profiles = PROJECT_AGENT_DIRS.flatMap((dir) =>
-		discoverInDirectory(join(rootDir, dir), "project"),
+		discoverInDirectory(join(rootDir, dir), "project", rootDir),
 	);
 	const home = homeDir();
 	if (home) {
@@ -127,5 +149,12 @@ export function loadAgentProfile(profileId: string, rootDir = process.cwd()): st
 		throw new Error(`Agent profile not found: ${profileId}`);
 	}
 
-	return readFileSync(profile.path, "utf8");
+	const content =
+		profile.scope === "project"
+			? readContainedProjectFile(rootDir, profile.path, MAX_PROFILE_BYTES)
+			: statSync(profile.path).size <= MAX_PROFILE_BYTES
+				? readFileSync(profile.path, "utf8")
+				: null;
+	if (content === null) throw new Error(`Agent profile is too large: ${profileId}`);
+	return content;
 }

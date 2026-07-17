@@ -30,7 +30,7 @@ export function StatusBar({ vimInputMode }: Props) {
 					</text>
 				)}
 				<text fg="#45475a" attributes={TextAttributes.DIM}>
-					{"/cmds"}
+					{"/help"}
 				</text>
 				<text fg="#45475a" attributes={TextAttributes.DIM}>
 					{"\u2666"}

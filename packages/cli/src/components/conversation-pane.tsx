@@ -1,6 +1,11 @@
 import { Spinner } from "@cli/components/spinner";
 import type { LLMMessage, LLMProvider, PendingApproval } from "@cli/services/llm";
-import { formatToolArgs, type ToolActivity } from "@cli/services/tool-activity";
+import {
+	formatApprovalArgs,
+	formatToolArgs,
+	formatToolResultPreview,
+	type ToolActivity,
+} from "@cli/services/tool-activity";
 import { type ScrollBoxRenderable, TextAttributes } from "@opentui/core";
 import type { RefObject } from "react";
 
@@ -120,6 +125,25 @@ export function ConversationPane({
 				</box>
 			))}
 
+			{!isLoading && toolActivities.length > 0 && (
+				<box
+					marginLeft={1}
+					paddingLeft={1}
+					border={["left"]}
+					borderColor={
+						toolActivities.some((activity) => activity.status === "failed") ? "#f38ba8" : "#45475a"
+					}
+					gap={0}
+				>
+					<text fg="#a6adc8" attributes={TextAttributes.BOLD}>
+						Tool trace
+					</text>
+					{toolActivities.map((activity) => (
+						<ToolActivityRow key={`tool-complete-${activity.id}`} activity={activity} />
+					))}
+				</box>
+			)}
+
 			{pendingApprovals.length > 0 && (
 				<box marginLeft={1} paddingLeft={1} border={["left"]} borderColor="#f9e2af" gap={0.5}>
 					<text fg="#f9e2af" attributes={TextAttributes.BOLD}>
@@ -127,9 +151,16 @@ export function ConversationPane({
 					</text>
 					{pendingApprovals.map((approval) => (
 						<box key={approval.id} gap={0} overflow="hidden">
-							<text fg="#89b4fa">{`${approval.toolName}  ${approval.id}`}</text>
-							<text fg="#6c7086" attributes={TextAttributes.DIM}>
-								{`/approve ${approval.id}   /deny ${approval.id}`}
+							<text fg="#89b4fa" attributes={TextAttributes.BOLD}>
+								{approval.toolName}
+							</text>
+							{approval.reason && <text fg="#f9e2af">{`Reason: ${approval.reason}`}</text>}
+							<text fg="#a6adc8">
+								{`Arguments: ${formatApprovalArgs(approval.toolName, approval.args)}`}
+							</text>
+							<text fg="#6c7086">{`ID: ${approval.id}`}</text>
+							<text fg="#a6adc8">
+								{`Approve: /approve ${approval.id}   Deny: /deny ${approval.id}`}
 							</text>
 						</box>
 					))}
@@ -207,21 +238,38 @@ function ToolActivityRow({
 	activity: ToolActivity;
 	emphasizeName?: boolean;
 }) {
+	const statusColor =
+		activity.status === "failed"
+			? "#f38ba8"
+			: activity.status === "succeeded"
+				? "#a6e3a1"
+				: "#f9e2af";
+	const statusIcon =
+		activity.status === "failed" ? "\u2717" : activity.status === "succeeded" ? "\u2713" : "\u25cb";
+	const resultPreview = formatToolResultPreview(activity);
+
 	return (
-		<box flexDirection="row" gap={1} overflow="hidden">
-			<text fg={activity.result ? "#a6e3a1" : "#f9e2af"}>
-				{activity.result ? "\u2713" : "\u25cb"}
-			</text>
-			<text fg="#89b4fa" attributes={emphasizeName ? TextAttributes.BOLD : undefined}>
-				{activity.name}
-			</text>
-			<text fg="#585b70" attributes={TextAttributes.DIM}>
-				{formatToolArgs(activity)}
-			</text>
-			{activity.durationMs != null && (
-				<text fg="#45475a" attributes={TextAttributes.DIM}>
-					{`${activity.durationMs}ms`}
+		<box gap={0} overflow="hidden">
+			<box flexDirection="row" gap={1} overflow="hidden">
+				<text fg={statusColor}>{statusIcon}</text>
+				<text fg="#89b4fa" attributes={emphasizeName ? TextAttributes.BOLD : undefined}>
+					{activity.name}
 				</text>
+				<text fg="#585b70" attributes={TextAttributes.DIM}>
+					{formatToolArgs(activity)}
+				</text>
+				{activity.durationMs != null && (
+					<text fg="#45475a" attributes={TextAttributes.DIM}>
+						{`${activity.durationMs}ms`}
+					</text>
+				)}
+			</box>
+			{resultPreview && (
+				<box paddingLeft={2} overflow="hidden">
+					<text fg={activity.status === "failed" ? "#f38ba8" : "#6c7086"}>
+						{`${activity.status === "failed" ? "Error" : "Result"}: ${resultPreview}`}
+					</text>
+				</box>
 			)}
 		</box>
 	);

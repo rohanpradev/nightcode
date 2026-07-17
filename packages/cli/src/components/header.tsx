@@ -1,3 +1,4 @@
+import { NIGHTCODE_VERSION } from "@cli/version";
 import { TextAttributes } from "@opentui/core";
 
 export function Header() {
@@ -21,7 +22,7 @@ export function Header() {
 				</text>
 
 				<text fg="#45475a" attributes={TextAttributes.DIM}>
-					{"\u2022 v0.1.0"}
+					{`\u2022 v${NIGHTCODE_VERSION}`}
 				</text>
 			</box>
 

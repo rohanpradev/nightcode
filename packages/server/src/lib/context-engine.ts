@@ -1,6 +1,8 @@
-import { resolve } from "node:path";
+import { realpath, stat } from "node:fs/promises";
+import { isAbsolute, relative, resolve } from "node:path";
 import { estimateTokens } from "./cache";
 import { logger } from "./logger";
+import { isSensitivePath } from "./sensitive-path";
 
 // Types
 export interface CodeSymbol {
@@ -32,8 +34,26 @@ export interface ContextConfig {
 	minRelevance: number;
 }
 
+export interface IndexDirectoryOptions {
+	/** Largest source file read into the in-memory index. */
+	maxFileBytes?: number;
+	/** Maximum number of source files indexed for one workspace. */
+	maxFiles?: number;
+	/** Stop incremental scans promptly when the owning run is cancelled. */
+	abortSignal?: AbortSignal;
+}
+
+export interface IndexFileOptions {
+	/** Largest source file read into the in-memory index. */
+	maxFileBytes?: number;
+}
+
+const DEFAULT_MAX_INDEX_FILE_BYTES = 1_000_000;
+const DEFAULT_MAX_INDEX_FILES = 20_000;
+
 // Repomap: Fast Symbol Index
 type RepositoryState = {
+	canonicalRoot: string;
 	symbolIndex: Map<string, CodeSymbol[]>;
 	fileModTimes: Map<string, number>;
 };
@@ -49,13 +69,83 @@ function repositoryState(root = process.cwd()): RepositoryState {
 	const key = repositoryKey(root);
 	const existing = repositoryStates.get(key);
 	if (existing) return existing;
-	const created = { symbolIndex: new Map(), fileModTimes: new Map() };
+	const created = {
+		canonicalRoot: resolve(root),
+		symbolIndex: new Map<string, CodeSymbol[]>(),
+		fileModTimes: new Map<string, number>(),
+	};
 	repositoryStates.set(key, created);
 	return created;
 }
 
 export function clearRepositoryIndex(root = process.cwd()): void {
 	repositoryStates.delete(repositoryKey(root));
+}
+
+function normalizePathSeparators(path: string): string {
+	return path.replace(/\\/g, "/");
+}
+
+function normalizePathForComparison(path: string): string {
+	const normalized = resolve(path);
+	return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+}
+
+function isWithinRoot(root: string, target: string): boolean {
+	const pathFromRoot = relative(root, target);
+	return (
+		pathFromRoot === "" ||
+		(pathFromRoot !== ".." &&
+			!pathFromRoot.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`) &&
+			!isAbsolute(pathFromRoot))
+	);
+}
+
+function samePath(left: string, right: string): boolean {
+	return normalizePathForComparison(left) === normalizePathForComparison(right);
+}
+
+function removeIndexedPath(state: RepositoryState, path: string): void {
+	for (const indexedPath of state.symbolIndex.keys()) {
+		if (!samePath(indexedPath, path)) continue;
+		state.symbolIndex.delete(indexedPath);
+		state.fileModTimes.delete(indexedPath);
+	}
+}
+
+function workspaceRelativePath(state: RepositoryState, filePath: string): string | null {
+	if (!isWithinRoot(state.canonicalRoot, filePath)) return null;
+	const pathFromRoot = relative(state.canonicalRoot, filePath);
+	return normalizePathSeparators(pathFromRoot);
+}
+
+function boundedPositiveInteger(value: number | undefined, fallback: number): number {
+	if (value === undefined || !Number.isFinite(value)) return fallback;
+	return Math.max(0, Math.floor(value));
+}
+
+type IndexableFile = {
+	canonicalPath: string;
+	modifiedAt: number;
+};
+
+async function resolveIndexableFile(
+	filePath: string,
+	canonicalRoot: string,
+	maxFileBytes: number,
+): Promise<IndexableFile | null> {
+	try {
+		const canonicalPath = await realpath(filePath);
+		if (!isWithinRoot(canonicalRoot, canonicalPath)) return null;
+		if (isSensitivePath(canonicalPath)) return null;
+
+		const info = await stat(canonicalPath);
+		if (!info.isFile() || info.size > maxFileBytes) return null;
+
+		return { canonicalPath, modifiedAt: info.mtimeMs };
+	} catch {
+		return null;
+	}
 }
 
 /** Extract symbols from TypeScript/JavaScript using regex (fast, no tree-sitter needed) */
@@ -194,47 +284,122 @@ function findStatementEnd(lines: string[], startIdx: number): number {
 	return startIdx + 1;
 }
 
-/** Index a file's symbols */
-export async function indexFile(filePath: string, root = process.cwd()): Promise<CodeSymbol[]> {
+async function indexResolvedFile(
+	candidate: IndexableFile,
+	state: RepositoryState,
+	maxFileBytes: number,
+): Promise<{ indexed: boolean; symbols: CodeSymbol[] }> {
 	try {
-		const file = Bun.file(filePath);
-		const state = repositoryState(root);
-		if (!(await file.exists())) {
-			state.symbolIndex.delete(filePath);
-			state.fileModTimes.delete(filePath);
-			return [];
+		const file = Bun.file(candidate.canonicalPath);
+		if (!(await file.exists()) || file.size > maxFileBytes) {
+			removeIndexedPath(state, candidate.canonicalPath);
+			return { indexed: false, symbols: [] };
 		}
 
-		const content = await file.text();
-		const symbols = extractSymbols(content, filePath);
+		const bytes = await file.slice(0, maxFileBytes + 1).arrayBuffer();
+		if (bytes.byteLength > maxFileBytes) {
+			removeIndexedPath(state, candidate.canonicalPath);
+			return { indexed: false, symbols: [] };
+		}
+		const content = new TextDecoder().decode(bytes);
+		const symbols = extractSymbols(content, candidate.canonicalPath);
 
-		state.symbolIndex.set(filePath, symbols);
-		state.fileModTimes.set(filePath, file.lastModified);
+		state.symbolIndex.set(candidate.canonicalPath, symbols);
+		state.fileModTimes.set(candidate.canonicalPath, candidate.modifiedAt);
 
-		return symbols;
+		return { indexed: true, symbols };
 	} catch {
-		return [];
+		removeIndexedPath(state, candidate.canonicalPath);
+		return { indexed: false, symbols: [] };
 	}
 }
 
-/** Index entire directory */
-export async function indexDirectory(dirPath: string): Promise<number> {
-	clearRepositoryIndex(dirPath);
-	const glob = new Bun.Glob("**/*.{ts,tsx,js,jsx,mjs,cts}");
-	const excluded = new Set(["node_modules", ".git", "dist", ".next", "coverage", ".bun", ".cache"]);
+/** Index a file's symbols after verifying its canonical path stays inside the workspace. */
+export async function indexFile(
+	filePath: string,
+	root = process.cwd(),
+	options: IndexFileOptions = {},
+): Promise<CodeSymbol[]> {
+	const state = repositoryState(root);
+	const maxFileBytes = boundedPositiveInteger(options.maxFileBytes, DEFAULT_MAX_INDEX_FILE_BYTES);
 
-	let indexed = 0;
-
-	for await (const file of glob.scan({ cwd: dirPath, onlyFiles: true })) {
-		const parts = file.split("/");
-
-		if (parts.some((p) => excluded.has(p))) continue;
-
-		await indexFile(resolve(dirPath, file), dirPath);
-		indexed++;
+	try {
+		state.canonicalRoot = await realpath(root);
+	} catch {
+		removeIndexedPath(state, filePath);
+		return [];
 	}
 
-	logger.info(`Indexed ${indexed} files, ${getSymbolCount(dirPath)} symbols (dir: ${dirPath})`);
+	const candidate = await resolveIndexableFile(filePath, state.canonicalRoot, maxFileBytes);
+	if (!candidate) {
+		removeIndexedPath(state, filePath);
+		return [];
+	}
+
+	return (await indexResolvedFile(candidate, state, maxFileBytes)).symbols;
+}
+
+/** Index entire directory */
+export async function indexDirectory(
+	dirPath: string,
+	options: IndexDirectoryOptions = {},
+): Promise<number> {
+	clearRepositoryIndex(dirPath);
+	return refreshRepositoryIndex(dirPath, options);
+}
+
+/** Incrementally refresh changed files and remove deleted entries. */
+export async function refreshRepositoryIndex(
+	dirPath: string,
+	options: IndexDirectoryOptions = {},
+): Promise<number> {
+	const state = repositoryState(dirPath);
+	const maxFileBytes = boundedPositiveInteger(options.maxFileBytes, DEFAULT_MAX_INDEX_FILE_BYTES);
+	const maxFiles = boundedPositiveInteger(options.maxFiles, DEFAULT_MAX_INDEX_FILES);
+
+	try {
+		state.canonicalRoot = await realpath(dirPath);
+	} catch {
+		return 0;
+	}
+
+	const glob = new Bun.Glob("**/*.{ts,tsx,js,jsx,mjs,cts}");
+	const excluded = new Set(["node_modules", ".git", "dist", ".next", "coverage", ".bun", ".cache"]);
+	let indexed = 0;
+	const seenCanonicalPaths = new Set<string>();
+
+	for await (const file of glob.scan({ cwd: dirPath, onlyFiles: true })) {
+		if (options.abortSignal?.aborted) {
+			throw options.abortSignal.reason ?? new Error("repository indexing aborted");
+		}
+		if (indexed >= maxFiles) break;
+		const parts = normalizePathSeparators(file).split("/");
+		if (parts.some((p) => excluded.has(p))) continue;
+
+		const candidate = await resolveIndexableFile(
+			resolve(dirPath, file),
+			state.canonicalRoot,
+			maxFileBytes,
+		);
+		if (!candidate) continue;
+
+		const canonicalKey = normalizePathForComparison(candidate.canonicalPath);
+		if (seenCanonicalPaths.has(canonicalKey)) continue;
+		seenCanonicalPaths.add(canonicalKey);
+
+		if (state.fileModTimes.get(candidate.canonicalPath) !== candidate.modifiedAt) {
+			const result = await indexResolvedFile(candidate, state, maxFileBytes);
+			if (!result.indexed) continue;
+		}
+		indexed++;
+	}
+	for (const indexedPath of [...state.symbolIndex.keys()]) {
+		if (seenCanonicalPaths.has(normalizePathForComparison(indexedPath))) continue;
+		state.symbolIndex.delete(indexedPath);
+		state.fileModTimes.delete(indexedPath);
+	}
+
+	logger.debug(`Refreshed ${indexed} files, ${getSymbolCount(dirPath)} symbols (dir: ${dirPath})`);
 
 	return indexed;
 }
@@ -280,56 +445,91 @@ export function findSymbols(
 
 // Context Ranking
 
-/** Score a file's relevance to a query */
+function stablePathCompare(left: string, right: string): number {
+	const normalizedLeft = normalizePathSeparators(left);
+	const normalizedRight = normalizePathSeparators(right);
+	const foldedLeft = normalizedLeft.toLowerCase();
+	const foldedRight = normalizedRight.toLowerCase();
+
+	if (foldedLeft < foldedRight) return -1;
+	if (foldedLeft > foldedRight) return 1;
+	if (normalizedLeft < normalizedRight) return -1;
+	if (normalizedLeft > normalizedRight) return 1;
+	return 0;
+}
+
+function scoreQueryRelevance(
+	filePath: string,
+	query: string,
+	symbols: CodeSymbol[],
+): { score: number; reason: string } {
+	let score = 0;
+	const reasons = new Set<string>();
+
+	const lowerQuery = normalizePathSeparators(query).trim().toLowerCase();
+	if (!lowerQuery) return { score: 0, reason: "none" };
+
+	const lowerPath = normalizePathSeparators(filePath).toLowerCase();
+	const pathParts = lowerPath.split("/");
+	const fileName = pathParts[pathParts.length - 1] ?? "";
+
+	if (lowerPath.includes(lowerQuery)) {
+		score += 0.5;
+		reasons.add("path-match");
+	}
+
+	if (fileName.includes(lowerQuery)) {
+		score += 0.3;
+		reasons.add("filename-match");
+	}
+
+	const queryWords = lowerQuery.split(/[\s/_.-]+/).filter((word) => word.length >= 3);
+	for (const word of queryWords) {
+		if (lowerPath.includes(word)) {
+			score += 0.1;
+			reasons.add(`path:${word}`);
+		}
+		if (fileName.includes(word)) {
+			score += 0.1;
+			reasons.add(`filename:${word}`);
+		}
+	}
+
+	for (const sym of symbols) {
+		for (const word of queryWords) {
+			if (sym.name.toLowerCase().includes(word)) {
+				score += 0.2;
+				reasons.add(`symbol:${sym.name}`);
+				break;
+			}
+		}
+	}
+
+	if (
+		score > 0 &&
+		(lowerPath.includes(".test.") || lowerPath.includes(".spec.")) &&
+		!queryWords.includes("test") &&
+		!queryWords.includes("spec")
+	) {
+		score *= 0.5;
+	}
+
+	if (score > 0 && fileName.startsWith("index.")) {
+		score += 0.1;
+	}
+
+	return { score: Math.min(score, 1), reason: [...reasons].join(",") || "none" };
+}
+
+/** Score a file's relevance to a query, with recency as a secondary signal. */
 function scoreFileRelevance(
 	filePath: string,
 	query: string,
 	symbols: CodeSymbol[],
 	fileModTimes: Map<string, number>,
 ): { score: number; reason: string } {
-	let score = 0;
-	const reasons: string[] = [];
-
-	const lowerQuery = query.toLowerCase();
-	const lowerPath = filePath.toLowerCase();
-
-	// Filename/path matching
-	const pathParts = filePath.split("/");
-	const fileName = pathParts[pathParts.length - 1] ?? "";
-
-	if (lowerPath.includes(lowerQuery)) {
-		score += 0.5;
-		reasons.push("path-match");
-	}
-
-	if (fileName.toLowerCase().includes(lowerQuery)) {
-		score += 0.3;
-		reasons.push("filename-match");
-	}
-
-	// Symbol name matching
-	const queryWords = lowerQuery.split(/\s+/);
-
-	for (const sym of symbols) {
-		for (const word of queryWords) {
-			if (word.length < 3) continue;
-
-			if (sym.name.toLowerCase().includes(word)) {
-				score += 0.2;
-				reasons.push(`symbol:${sym.name}`);
-				break;
-			}
-		}
-	}
-
-	// File type relevance
-	if (filePath.endsWith(".test.ts") || filePath.endsWith(".spec.ts")) {
-		score *= 0.5; // Deprioritize test files unless explicitly searching for test
-	}
-
-	if (filePath.includes("index.")) {
-		score += 0.1; // Index files are often important entry points
-	}
+	const relevance = scoreQueryRelevance(filePath, query, symbols);
+	let score = relevance.score;
 
 	// Recency bonus
 	const modTime = fileModTimes.get(filePath);
@@ -345,7 +545,7 @@ function scoreFileRelevance(
 		}
 	}
 
-	return { score: Math.min(score, 1), reason: reasons.join(",") || "none" };
+	return { score: Math.min(score, 1), reason: relevance.reason };
 }
 
 // Context Assembly
@@ -398,7 +598,7 @@ export async function assembleContext(
 	}
 
 	// 3. Sort by relevance and fill token budget
-	candidates.sort((a, b) => b.score - a.score);
+	candidates.sort((a, b) => b.score - a.score || stablePathCompare(a.path, b.path));
 
 	for (const candidate of candidates) {
 		if (tokensUsed >= config.maxTokens) break;
@@ -446,23 +646,37 @@ export async function assembleContext(
 	return results;
 }
 
-/** Generate a repomap summary (like Aider) - concise file/symbol listing */
-export function generateRepomap(maxTokens = 4000, root = process.cwd()): string {
+/** Generate a repomap summary (like Aider) - concise file/symbol listing. */
+export function generateRepomap(maxTokens = 4000, root = process.cwd(), query?: string): string {
 	const lines: string[] = ["# Repository Map\n"];
 	let tokens = 50;
 	const state = repositoryState(root);
+	const hasQuery = Boolean(query?.trim());
+	const files = [...state.symbolIndex.entries()]
+		.map(([filePath, symbols]) => {
+			const relativePath = workspaceRelativePath(state, filePath);
+			if (relativePath === null) return null;
 
-	// Sort files by recency
-	const files = [...state.symbolIndex.entries()].sort((a, b) => {
-		const aTime = state.fileModTimes.get(a[0]) ?? 0;
-		const bTime = state.fileModTimes.get(b[0]) ?? 0;
-		return bTime - aTime;
-	});
+			return {
+				filePath,
+				relativePath,
+				symbols,
+				queryScore: hasQuery ? scoreQueryRelevance(relativePath, query ?? "", symbols).score : 0,
+			};
+		})
+		.filter((file): file is NonNullable<typeof file> => file !== null)
+		.sort((a, b) => {
+			if (hasQuery && b.queryScore !== a.queryScore) return b.queryScore - a.queryScore;
 
-	for (const [filePath, symbols] of files) {
+			const aTime = state.fileModTimes.get(a.filePath) ?? 0;
+			const bTime = state.fileModTimes.get(b.filePath) ?? 0;
+			return bTime - aTime || stablePathCompare(a.relativePath, b.relativePath);
+		});
+
+	for (const { relativePath, symbols } of files) {
 		if (tokens >= maxTokens) break;
 
-		const fileHeader = `\n## ${filePath}`;
+		const fileHeader = `\n## ${relativePath}`;
 		const symLines = symbols
 			.filter((s) => s.kind !== "method")
 			.map((s) => `${s.kind}: ${s.name}${s.signature ? ` ${s.signature}` : ""}`)
@@ -471,7 +685,7 @@ export function generateRepomap(maxTokens = 4000, root = process.cwd()): string 
 		const entry = `${fileHeader}\n${symLines}`;
 		const entryTokens = estimateTokens(entry);
 
-		if (tokens + entryTokens > maxTokens) break;
+		if (tokens + entryTokens > maxTokens) continue;
 
 		lines.push(entry);
 		tokens += entryTokens;

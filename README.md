@@ -8,11 +8,14 @@ The default OpenAI model is `gpt-5.6`. Anthropic and Azure OpenAI are also suppo
 
 ```powershell
 bun install
-Copy-Item .env.example .env
+New-Item -ItemType Directory -Force "$HOME\.nightcode"
+Copy-Item .env.example "$HOME\.nightcode\.env"
 bun run dev:cli -- --workspace C:\path\to\project
 ```
 
-Set at least one provider credential in `.env`:
+Night Code deliberately does not load `.env` from the selected workspace. Set at least one
+provider credential in `~/.nightcode/.env`, in the parent process, or in an explicit file selected
+by the parent-process `NIGHTCODE_ENV_FILE` variable:
 
 ```dotenv
 OPENAI_API_KEY=sk-...
@@ -29,16 +32,32 @@ bun run dev:server
 ## What is implemented
 
 - One stateful runtime per session and workspace; concurrent runs in one session are rejected.
+- Filesystem mutations from different sessions sharing one workspace are serialized through an
+  abort-aware FIFO coordinator.
 - Versioned NDJSON events with run, sequence, step, tool-call, approval, usage, abort, error, and completion metadata.
 - Presentation-only `notice` messages that are persisted by the CLI but never sent to a model.
 - Canonical path authorization that resolves symlinks and junctions before containment checks.
 - Structured, multi-file patching with preflight validation, atomic writes, rollback, SHA-256 preconditions, checkpoints, and conflict-safe undo.
+- A trusted runtime-policy envelope for approval, BUILD/PLAN mode, model output, retry/step,
+  tool output/timeout, run-duration, context, and filesystem-root budgets. Repository policy may
+  narrow this envelope but cannot weaken it.
+- PLAN mode exposes inspection tools only, does not connect project MCP servers, and permits only
+  the narrow low-risk shell inspection allowlist.
 - Risk-classified shell execution with approval modes, time/output bounds, cancellation, a minimal child environment, and provider-secret stripping.
-- Session/workspace-pinned HTTP routes, bounded runtime retention, cancellation propagation, and structured stream errors.
+- Sensitive-file reads require approval (or are denied by non-interactive policy); repository maps
+  and literal search skip conventional credential and private-key paths.
+- Session/workspace-pinned HTTP routes, loopback-only default binding, optional bearer
+  authentication on every route, bounded request/runtime retention, cancellation propagation, and
+  structured stream errors.
 - SQLite session storage with WAL, legacy `sessions.json` import, atomic upserts, and a 100-session retention limit.
-- Workspace-isolated, incrementally refreshed repository maps.
-- Validated `.nightcode` configuration with surfaced diagnostics instead of silent fallback.
-- MCP over HTTP or local stdio, namespaced tools, allowlists, redacted inherited environments, and approval by default.
+- Workspace-isolated repository maps that refresh before runs, remove stale entries, rank against
+  the latest user query, use relative normalized paths, and enforce file/count/token bounds.
+- Canonically contained and size-bounded `.nightcode` configuration with surfaced diagnostics instead of silent fallback.
+- MCP over HTTPS or local stdio, explicit workspace trust, namespaced tools, allowlists, redacted
+  inherited environments, connection/discovery timeouts, URL checks, and approval by default.
+- Atomic, idempotent approval resolution so a repeated response cannot execute a tool twice.
+- CLI startup validation, truthful pending/succeeded/failed tool traces, detailed approval cards,
+  and a save-before-exit lifecycle.
 - TypeScript 7.0.2's production native compiler, AI SDK 7, Biome, Bun tests, and focused harness/security regression suites.
 
 ## Agent controls
@@ -54,23 +73,30 @@ Useful CLI commands:
 - `/sessions`, `/continue`, `/resume <id>` — restore durable local conversations.
 - `/todo`, `/status`, `/stats`, `/cost`, `/doctor` — inspect agent and runtime state.
 
+Use `nightcode --help` for startup options and `nightcode --version` for the exact build version.
+Unknown options fail with usage guidance. In the TUI, Ctrl+C aborts an active run; when idle, it
+saves the current session and exits.
+
 ## Configuration
 
 Project policy lives in `.nightcode/config.yaml`:
 
 ```yaml
-model: gpt-5.6
 mode: BUILD
 approvalMode: on-risk
 maxAgentSteps: 20
 maxRetries: 2
 maxToolOutputChars: 60000
 maxToolTimeoutMs: 120000
+maxRunDurationMs: 900000
 contextBudget: 16000
 requirePlanForEdits: true
-allowedPaths: []
 disabledTools: []
 ```
+
+Provider/model selection and additional filesystem roots are trusted user settings. A project
+`model` is ignored unless trusted configuration explicitly sets `NIGHTCODE_ALLOW_PROJECT_MODEL=true`,
+and project `allowedPaths` never grants access.
 
 See [configuration](docs/configuration.md), [architecture](docs/architecture.md), [security](docs/security.md), and [evaluation](docs/evaluation.md).
 
@@ -87,7 +113,11 @@ See [configuration](docs/configuration.md), [architecture](docs/architecture.md)
 
 `POST /chat` and `POST /approvals` stream one validated `LLMStreamChunk` JSON object per line. The response also carries `X-Nightcode-Session-Id`.
 
-The server accepts workspaces only below `NIGHTCODE_SERVER_WORKSPACE_ROOTS` (the process working directory by default). Separate multiple roots with the platform path delimiter.
+The server listens on `127.0.0.1` by default. `NIGHTCODE_API_TOKEN`, when set, protects every route
+with bearer authentication and is mandatory when `NIGHTCODE_HOST` is not loopback. Authentication
+does not provide TLS; terminate TLS in front of any remote deployment.
+
+The server accepts workspaces only below `NIGHTCODE_SERVER_WORKSPACE_ROOTS` (the process working directory by default). Separate multiple roots with the platform path delimiter. Request bodies are limited to 8 MiB, and active or approval-pending sessions cannot be deleted.
 
 ## Quality gates
 

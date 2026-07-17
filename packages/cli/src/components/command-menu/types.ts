@@ -1,9 +1,9 @@
 import type { LLMProvider } from "@/cli/services/llm";
 
 export type CommandContext = {
-	exit: () => void;
-	clear: () => void;
-	newConversation: () => void;
+	exit: () => void | Promise<void>;
+	clear: () => void | Promise<void>;
+	newConversation: () => void | Promise<void>;
 	switchWorkspace: (path: string) => Promise<unknown>;
 	showHelp: () => void;
 	setModel: (model: string) => void;

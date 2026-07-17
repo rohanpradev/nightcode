@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadProjectConfig } from "./config-loader";
@@ -80,5 +80,21 @@ describe("project config loader", () => {
 		expect(invalid.diagnostics).toHaveLength(1);
 		expect(invalid.diagnostics[0]).toMatchObject({ severity: "error" });
 		expect(invalid.diagnostics[0]?.file).toMatch(/[\\/]\.nightcode[\\/]mcp\.json$/);
+	});
+
+	it("does not load instruction directories that escape through a link", async () => {
+		const root = await createProject({});
+		const outside = await mkdtemp(join(tmpdir(), "nightcode-config-outside-"));
+		await writeFile(join(outside, "leak.instructions.md"), "host-secret-marker");
+		await mkdir(join(root, ".github"), { recursive: true });
+		try {
+			await symlink(outside, join(root, ".github", "instructions"), "junction");
+		} catch {
+			return;
+		}
+
+		const loaded = loadProjectConfig(root);
+		expect(loaded.instructions).toBeNull();
+		expect(loaded.diagnostics.some((item) => item.message.includes("escapes"))).toBe(true);
 	});
 });

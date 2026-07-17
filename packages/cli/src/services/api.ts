@@ -9,12 +9,16 @@ import {
 import { hc } from "hono/client";
 
 const SERVER_URL = process.env.NIGHTCODE_SERVER_URL ?? "http://localhost:3000";
+const API_TOKEN = process.env.NIGHTCODE_API_TOKEN?.trim();
 
 export type Client = ReturnType<typeof hc<AppType>>;
 
 export const hcWithType = (...args: Parameters<typeof hc>): Client => hc<AppType>(...args);
 
-export const api = hcWithType(SERVER_URL);
+export const api = hcWithType(
+	SERVER_URL,
+	API_TOKEN ? { headers: { Authorization: `Bearer ${API_TOKEN}` } } : undefined,
+);
 
 export async function* streamChat(
 	request: ChatRequest,

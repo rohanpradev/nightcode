@@ -1,5 +1,13 @@
 import { z } from "zod";
 
+const MAX_MESSAGE_CHARS = 2_000_000;
+const MAX_MESSAGES_PER_REQUEST = 200;
+const sessionIdSchema = z
+	.string()
+	.min(1)
+	.max(120)
+	.regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/, "session id contains unsupported characters");
+
 export const supportedProviderSchema = z.enum(["openai", "anthropic", "azure"]);
 
 export const llmMessageSchema = z.object({
@@ -7,7 +15,7 @@ export const llmMessageSchema = z.object({
 	// never sent to a model, which keeps CLI diagnostics out of the trusted
 	// instruction channel.
 	role: z.enum(["system", "user", "assistant", "notice"]),
-	content: z.string(),
+	content: z.string().max(MAX_MESSAGE_CHARS),
 });
 
 export const approvalModeSchema = z.enum(["always", "on-risk", "never"]);
@@ -16,20 +24,20 @@ export const reasoningEffortSchema = z.enum(["none", "low", "medium", "high", "x
 
 export const llmConfigSchema = z.object({
 	provider: supportedProviderSchema.default("openai"),
-	model: z.string().default("gpt-5.6"),
-	maxTokens: z.number().int().positive().default(8192),
+	model: z.string().min(1).max(200).default("gpt-5.6"),
+	maxTokens: z.number().int().positive().max(128_000).default(8192),
 	temperature: z.number().min(0).max(2).default(0.2),
-	systemPrompt: z.string().optional(),
+	systemPrompt: z.string().max(256_000).optional(),
 	agentMode: z.boolean().default(true),
 	reasoningEffort: reasoningEffortSchema.optional(),
 	approvalMode: approvalModeSchema.default("on-risk"),
 });
 
 export const chatRequestSchema = z.object({
-	messages: z.array(llmMessageSchema).min(1),
+	messages: z.array(llmMessageSchema).min(1).max(MAX_MESSAGES_PER_REQUEST),
 	config: llmConfigSchema.partial().optional(),
-	sessionId: z.string().min(1).max(120).optional(),
-	workspace: z.string().min(1).optional(),
+	sessionId: sessionIdSchema.optional(),
+	workspace: z.string().min(1).max(4_096).optional(),
 });
 
 const usageSchema = z.object({
@@ -136,14 +144,14 @@ export const llmStreamChunkSchema = z.discriminatedUnion("type", [
 ]);
 
 export const approvalDecisionSchema = z.object({
-	approvalId: z.string().min(1),
+	approvalId: z.string().min(1).max(200),
 	approved: z.boolean(),
 	reason: z.string().max(500).optional(),
 });
 
 export const approvalRequestSchema = z.object({
-	sessionId: z.string().min(1).max(120),
-	workspace: z.string().min(1).optional(),
+	sessionId: sessionIdSchema,
+	workspace: z.string().min(1).max(4_096).optional(),
 	decision: approvalDecisionSchema,
 });
 

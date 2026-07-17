@@ -1,14 +1,30 @@
-import { dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join, resolve } from "node:path";
 import { config } from "dotenv";
 
-const here = dirname(fileURLToPath(import.meta.url));
-const repoRootEnv = resolve(here, "../../../..", ".env");
-const cwdEnv = resolve(process.cwd(), ".env");
+export interface TrustedEnvPathOptions {
+	home?: string;
+	explicitPath?: string;
+}
 
-config({ path: repoRootEnv, quiet: true });
-if (cwdEnv !== repoRootEnv) {
-	config({ path: cwdEnv, override: true, quiet: true });
+/**
+ * Workspace .env files are deliberately excluded. Repository-controlled env
+ * values must never be able to redirect provider traffic or weaken policy.
+ */
+export function trustedEnvPaths(options: TrustedEnvPathOptions = {}): string[] {
+	const explicitPath = options.explicitPath ?? process.env.NIGHTCODE_ENV_FILE?.trim();
+	if (explicitPath) return [resolve(explicitPath)];
+
+	const home =
+		options.home ??
+		process.env.NIGHTCODE_HOME?.trim() ??
+		process.env.HOME ??
+		process.env.USERPROFILE;
+	const paths = home ? [join(home, ".nightcode", ".env")] : [];
+	return [...new Set(paths.map((path) => resolve(path)))];
+}
+
+for (const path of trustedEnvPaths()) {
+	config({ path, quiet: true });
 }
 
 export function optionalEnv(name: string): string | undefined {

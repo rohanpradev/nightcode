@@ -1,5 +1,6 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { readContainedProjectFile } from "./project-files";
 
 export interface LspServerConfig {
 	id: string;
@@ -12,6 +13,7 @@ export interface LspServerConfig {
 
 const PROJECT_LSP_FILES = [".github/lsp.json", ".nightcode/lsp.json"];
 const GLOBAL_LSP_FILES = [".copilot/lsp-config.json", ".nightcode/lsp.json"];
+const MAX_LSP_CONFIG_BYTES = 256_000;
 
 function homeDir(): string | null {
 	return process.env.HOME ?? process.env.USERPROFILE ?? null;
@@ -34,11 +36,21 @@ function stringRecord(value: unknown): Record<string, string> | undefined {
 	return Object.fromEntries(entries) as Record<string, string>;
 }
 
-function readLspFile(source: string, scope: LspServerConfig["scope"]): LspServerConfig[] {
+function readLspFile(
+	source: string,
+	scope: LspServerConfig["scope"],
+	projectRoot?: string,
+): LspServerConfig[] {
 	if (!existsSync(source)) return [];
 
 	try {
-		const parsed = JSON.parse(readFileSync(source, "utf8"));
+		const content = projectRoot
+			? readContainedProjectFile(projectRoot, source, MAX_LSP_CONFIG_BYTES)
+			: statSync(source).size <= MAX_LSP_CONFIG_BYTES
+				? readFileSync(source, "utf8")
+				: null;
+		if (content === null) return [];
+		const parsed = JSON.parse(content);
 		const rawServers = isRecord(parsed) && isRecord(parsed.lspServers) ? parsed.lspServers : parsed;
 		if (!isRecord(rawServers)) return [];
 
@@ -64,7 +76,9 @@ function readLspFile(source: string, scope: LspServerConfig["scope"]): LspServer
 }
 
 export function discoverLspServers(rootDir = process.cwd()): LspServerConfig[] {
-	const servers = PROJECT_LSP_FILES.flatMap((file) => readLspFile(join(rootDir, file), "project"));
+	const servers = PROJECT_LSP_FILES.flatMap((file) =>
+		readLspFile(join(rootDir, file), "project", rootDir),
+	);
 	const home = homeDir();
 	if (home) {
 		servers.push(...GLOBAL_LSP_FILES.flatMap((file) => readLspFile(join(home, file), "global")));

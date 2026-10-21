@@ -2,9 +2,12 @@
 
 Night Code is a terminal-first coding-agent harness for Bun and TypeScript. It combines a scoped agent runtime, canonical workspace boundaries, approval-gated tools, transactional patches, durable local sessions, MCP tools, repository context, and a typed streaming API.
 
-The default OpenAI model is `gpt-5.6`. Anthropic and Azure OpenAI are also supported.
+Models from OpenAI and Anthropic are routed through Vercel AI Gateway. Only a Gateway credential
+is required; provider API keys are not used.
 
 ## Quick start
+
+Install [Bun 1.4.3](https://bun.com/blog/bun-v1.4.3) or newer (`bun upgrade` updates an existing install).
 
 ```powershell
 bun install
@@ -13,15 +16,25 @@ Copy-Item .env.example "$HOME\.nightcode\.env"
 bun run dev:cli -- --workspace C:\path\to\project
 ```
 
-Night Code deliberately does not load `.env` from the selected workspace. Set at least one
-provider credential in `~/.nightcode/.env`, in the parent process, or in an explicit file selected
+Night Code deliberately does not load `.env` from the selected workspace. Set a Vercel AI Gateway
+credential in `~/.nightcode/.env`, in the parent process, or in an explicit file selected
 by the parent-process `NIGHTCODE_ENV_FILE` variable:
 
 ```dotenv
-OPENAI_API_KEY=sk-...
+AI_GATEWAY_API_KEY=your-vercel-ai-gateway-key
 NIGHTCODE_PROVIDER=openai
-NIGHTCODE_MODEL=gpt-5.6
+NIGHTCODE_MODEL=gpt-6-astra
 ```
+
+On Vercel, the runtime can authenticate with `VERCEL_OIDC_TOKEN` instead. Gateway model IDs use
+the form `provider/model`; Night Code adds the provider prefix when you select a known short ID.
+
+New OpenAI sessions default to GPT-6 Astra. GPT-6.1 Sol is available for a lower-cost option,
+and GPT-6 Luna for focused tasks. Existing explicit model selections remain available.
+GPT-6 tool calls use Responses through Gateway; reasoning requests omit unsupported sampling
+parameters. Token costs shown in the CLI estimate base rates and may differ from Gateway billing.
+Anthropic sessions default to Claude Sonnet 5.5, with Opus 5.5 also available. Their signed
+reasoning history remains append-only across tools and approval continuations.
 
 To run the HTTP service separately:
 
@@ -29,11 +42,35 @@ To run the HTTP service separately:
 bun run dev:server
 ```
 
+`bun dev` starts both the terminal UI and HTTP service in watch mode. The HTTP service
+listens on `http://127.0.0.1:3000` by default; set `PORT` or `NIGHTCODE_PORT` to use another
+port. If that port is already occupied by another process, stop that process or choose
+a different port.
+
+To check the complete local API and AI editing workflow, configure your Gateway credential
+as above, then run `bun run test:server:live`. This opt-in check makes a real model request
+and verifies that the agent improves a temporary README using file tools. It prints the
+result path under `tmp/server-live-*` and may incur provider charges. The regular `bun test`
+suite does not require a live model.
+
+For the broader low-cost live suite (streaming, README edits, literal replacements, approved undo,
+duplicate approval protection, and denied deletion), run `bun run test:gateway:live`. It defaults to
+GPT-4.1 mini with zero retries, ten steps per run, and 768 output tokens per step. If your trusted
+Gateway key is in this repository's root `.env`, explicitly select it for the test:
+
+```powershell
+$env:NIGHTCODE_ENV_FILE = Join-Path (Get-Location) '.env'
+bun run test:gateway:live
+```
+
+Reports and disposable fixtures are saved under `tmp/gateway-live-*`; no key is written to reports.
+See the [live test results](docs/live-gateway-tests-2026-10-07.md) for costs and the nano/mini comparison.
+
 ## What is implemented
 
 - One stateful runtime per session and workspace; concurrent runs in one session are rejected.
-- Filesystem mutations from different sessions sharing one workspace are serialized through an
-  abort-aware FIFO coordinator.
+- Filesystem mutations from sessions with overlapping workspaces or allowed roots are serialized
+  through an abort-aware FIFO coordinator.
 - Versioned NDJSON events with run, sequence, step, tool-call, approval, usage, abort, error, and completion metadata.
 - Presentation-only `notice` messages that are persisted by the CLI but never sent to a model.
 - Canonical path authorization that resolves symlinks and junctions before containment checks.
@@ -58,7 +95,10 @@ bun run dev:server
 - Atomic, idempotent approval resolution so a repeated response cannot execute a tool twice.
 - CLI startup validation, truthful pending/succeeded/failed tool traces, detailed approval cards,
   and a save-before-exit lifecycle.
-- TypeScript 7.0.2's production native compiler, AI SDK 7, Biome, Bun tests, and focused harness/security regression suites.
+- Bun 1.4.3's built-in TypeScript checker, Drizzle ORM/Kit 1.0.0-rc.4,
+  AI SDK 7.0.146 with MCP 2.0.80, OpenTUI 0.6.6, React 19.3.1, Hono 4.13.13, Biome 2.5.15, and focused regression suites.
+- Demand-driven HTTP streaming with cancellation cleanup, bounded client event parsing, and
+  failure-preserving run outcomes.
 
 ## Agent controls
 
@@ -98,7 +138,12 @@ Provider/model selection and additional filesystem roots are trusted user settin
 `model` is ignored unless trusted configuration explicitly sets `NIGHTCODE_ALLOW_PROJECT_MODEL=true`,
 and project `allowedPaths` never grants access.
 
-See [configuration](docs/configuration.md), [architecture](docs/architecture.md), [security](docs/security.md), and [evaluation](docs/evaluation.md).
+See [configuration](docs/configuration.md), [architecture](docs/architecture.md),
+[security](docs/security.md), [evaluation](docs/evaluation.md), and the
+[source-backed improvement plan](docs/improvement-plan.md). The [dependency review](docs/dependency-review.md)
+records the official documentation, selected versions, compatibility changes, and validation
+results for the October 20, 2026 upgrade. The [harness review](docs/harness-review.md) connects
+the current engineering research to implemented behavior and remaining evaluation work.
 
 ## API
 
@@ -113,6 +158,9 @@ See [configuration](docs/configuration.md), [architecture](docs/architecture.md)
 
 `POST /chat` and `POST /approvals` stream one validated `LLMStreamChunk` JSON object per line. The response also carries `X-Nightcode-Session-Id`.
 
+The `/models` command and `GET /models` read Vercel AI Gateway's live model catalog, cached for
+five minutes. If Gateway is unreachable, the CLI uses its bundled catalog as a fallback.
+
 The server listens on `127.0.0.1` by default. `NIGHTCODE_API_TOKEN`, when set, protects every route
 with bearer authentication and is mandatory when `NIGHTCODE_HOST` is not loopback. Authentication
 does not provide TLS; terminate TLS in front of any remote deployment.
@@ -125,7 +173,9 @@ The server accepts workspaces only below `NIGHTCODE_SERVER_WORKSPACE_ROOTS` (the
 bun run verify
 ```
 
-`verify` runs formatting, linting, workspace-parallel TypeScript checks, tests with source-only text and LCOV coverage, enforced coverage floors, and dependency-ordered production builds. Useful focused commands are:
+`verify` runs formatting, linting, workspace-parallel and build-script TypeScript checks,
+Drizzle migration checks, tests with source-only text and LCOV coverage, enforced coverage floors,
+and dependency-ordered production builds. Empty coverage reports fail the gate. Useful focused commands are:
 
 ```powershell
 bun run test:watch
@@ -133,15 +183,38 @@ bun run test:stress
 bun run eval:harness
 bun run build:cli:compile
 bun run build:cli:bytecode
+bun run test:cli:bundle
 bun run deps:check
+bun run db:check
 bun run clean
 ```
 
-CI should install exact lockfile versions with `bun ci` before `bun run verify`. Local package binaries run with `bunx --no-install`, so a missing development dependency fails instead of being downloaded implicitly.
+The GitHub Actions workflow runs `bun ci`, `bun run verify`, and randomized repeat tests on
+Windows and Linux with Bun 1.4.3. Actions are pinned to commit hashes and coverage is retained
+for 14 days. Local package binaries run with `bunx --no-install`, so a missing development
+dependency fails instead of being downloaded implicitly.
+
+CI smoke-tests both the source and built JavaScript terminal UI. Ship the bundle together with
+all emitted assets in `packages/cli/dist`; native-library paths resolve relative to the bundle.
 
 The bytecode CLI is an ESM standalone executable tied to the Bun version that built it. The regular bundle and compiled executable remain available for development and distribution respectively.
 
-The repository uses TypeScript 7's native `tsc` with eight parallel checkers. No TypeScript compiler API compatibility package is needed because this project does not use the compiler API or typescript-eslint.
+Project Bun configuration disables automatic `.env` loading. Standalone executables also disable
+automatic `.env` and `bunfig.toml` loading at build time. To launch a source entry or JS bundle
+from another directory, use `bun --no-env-file <entry>` so configuration comes from the trusted
+user settings described above.
+
+Workspace type checks use `bun check`; build scripts use `--check` or `Bun.build({ check: true })`.
+The root build-script check uses `bun --check --tsconfig-override scripts/tsconfig.json` because
+the root `check` script is the combined quality gate. TypeScript 7.0.2 remains installed for editor
+support and matches Bun 1.4.3's checker. No compiler API compatibility package is needed.
+
+OpenTUI 0.6 restores the terminal asynchronously. CLI shutdown waits for `renderer.closed`
+before exiting, including the UI smoke test.
+
+Drizzle ORM and Kit are pinned to the same v1 release candidate. Migration history uses the v3
+folder format and the database factory uses `defineRelations`. See the
+[database upgrade notes](docs/database.md) for migration commands and compatibility checks.
 
 ## Packages
 

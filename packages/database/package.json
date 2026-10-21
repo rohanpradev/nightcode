@@ -8,17 +8,19 @@
 		"./schema": "./src/schema.ts"
 	},
 	"scripts": {
-		"build": "bun build src/index.ts --outdir dist --target bun --minify --sourcemap=external",
-		"typecheck": "bunx --no-install --bun tsc --noEmit --checkers 8 -p tsconfig.json",
+		"build": "bun build --check src/index.ts --outdir dist --target bun --minify --sourcemap=external",
+		"typecheck": "bun check --project tsconfig.json",
 		"db:generate": "bunx --no-install --bun drizzle-kit generate",
+		"db:up": "bunx --no-install --bun drizzle-kit up",
+		"db:check": "bunx --no-install --bun drizzle-kit check",
 		"db:push": "bunx --no-install --bun drizzle-kit push",
 		"db:studio": "bunx --no-install --bun drizzle-kit studio",
 		"db:migrate": "bunx --no-install --bun drizzle-kit migrate"
 	},
 	"dependencies": {
-		"drizzle-orm": "^0.45.2"
+		"drizzle-orm": "1.0.0-rc.4"
 	},
 	"devDependencies": {
-		"drizzle-kit": "^0.31.10"
+		"drizzle-kit": "1.0.0-rc.4"
 	}
 }

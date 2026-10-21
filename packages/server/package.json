@@ -5,6 +5,7 @@
 	"exports": {
 		".": "./src/index.ts",
 		"./lib/agent-profiles": "./src/lib/agent-profiles.ts",
+		"./lib/bounded-files": "./src/lib/bounded-files.ts",
 		"./lib/context-engine": "./src/lib/context-engine.ts",
 		"./lib/lsp-config": "./src/lib/lsp-config.ts",
 		"./lib/skills": "./src/lib/skills.ts",
@@ -12,22 +13,18 @@
 	},
 	"scripts": {
 		"dev": "bun --watch run src/index.ts",
-		"build": "bun build src/index.ts --outdir dist --target bun --minify --sourcemap=external",
+		"build": "bun build --check src/index.ts --outdir dist --target bun --minify --sourcemap=external",
 		"test": "bun test src",
-		"typecheck": "bunx --no-install --bun tsc --noEmit --checkers 8 -p tsconfig.json"
+		"typecheck": "bun check --project tsconfig.json"
 	},
 	"dependencies": {
-		"@ai-sdk/anthropic": "4.0.5",
-		"@ai-sdk/azure": "4.0.5",
-		"@ai-sdk/mcp": "^2.0.13",
-		"@ai-sdk/openai": "4.0.5",
-		"@hono/zod-validator": "^0.8.0",
+		"@ai-sdk/mcp": "2.0.80",
+		"@hono/zod-validator": "^0.9.1",
 		"@nightcode/database": "workspace:*",
 		"@nightcode/shared": "workspace:*",
-		"ai": "7.0.11",
-		"dotenv": "^17.4.2",
-		"drizzle-orm": "^0.45.2",
-		"hono": "^4.12.27",
-		"zod": "^4.4.3"
+		"ai": "7.0.146",
+		"dotenv": "^18.0.8",
+		"hono": "^4.13.13",
+		"zod": "^4.6.7"
 	}
 }

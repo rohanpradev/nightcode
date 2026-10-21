@@ -24,7 +24,20 @@ export function trustedEnvPaths(options: TrustedEnvPathOptions = {}): string[] {
 }
 
 for (const path of trustedEnvPaths()) {
-	config({ path, quiet: true });
+	// Dotenv 18 also reads DOTENV_* defaults from the environment. Keep parent
+	// values authoritative and diagnostics out of the terminal/stream protocol.
+	config({ path, quiet: true, debug: false, override: false });
+}
+
+// Current providers validate their default singleton during module evaluation.
+// Blank optional URLs from user templates mean "use the provider default".
+for (const name of [
+	"OPENAI_BASE_URL",
+	"ANTHROPIC_BASE_URL",
+	"AZURE_BASE_URL",
+	"AZURE_OPENAI_BASE_URL",
+]) {
+	if (process.env[name] !== undefined && !process.env[name]?.trim()) delete process.env[name];
 }
 
 export function optionalEnv(name: string): string | undefined {

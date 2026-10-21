@@ -1,9 +1,10 @@
 import {
+	asSchema,
 	type JSONValue,
 	type LanguageModel,
 	type LanguageModelUsage,
 	type ModelMessage,
-	stepCountIs,
+	type TextStreamPart,
 	ToolLoopAgent,
 	type ToolSet,
 	tool,
@@ -14,6 +15,7 @@ import { isAbsolute, relative, resolve } from "node:path";
 import {
 	type ApprovalDecision,
 	type ApprovalMode,
+	getDefaultModelForProvider,
 	getProviderForModel,
 	type LLMConfig,
 	type LLMMessage,
@@ -23,6 +25,13 @@ import {
 	supportedChatModels,
 } from "@nightcode/shared";
 import { z } from "zod";
+import {
+	ContextBudgetExceededError,
+	compactLoopMessages,
+	createLoopControl,
+	estimateLoopTokens,
+	loopHistoryBudget,
+} from "../lib/agent-loop-control";
 import {
 	discoverAgentProfiles,
 	formatAgentProfileCatalog,
@@ -40,11 +49,14 @@ import {
 } from "../lib/context-engine";
 import { discoverLspServers, formatLspCatalog } from "../lib/lsp-config";
 import { type ConnectedMCPTools, connectMCPTools } from "../lib/mcp-runtime";
+import { requiresAppendOnlyHistory, resolveModelCallSettings } from "../lib/model-call-settings";
 import { workspaceMutationCoordinator } from "../lib/mutation-coordinator";
 import {
 	applyStructuredPatch,
 	type PatchSnapshot,
 	patchOperationSchema,
+	readPatchText,
+	replaceUniqueText,
 	restorePatch,
 	structuredPatchSchema,
 } from "../lib/patch-engine";
@@ -52,12 +64,7 @@ import { type RuntimePolicy, resolveRuntimePolicy } from "../lib/runtime-policy"
 import { isSensitivePath } from "../lib/sensitive-path";
 import { assessShellCommand, type CommandAssessment, runShellCommand } from "../lib/shell-policy";
 import { discoverSkills, formatSkillCatalog, loadSkill } from "../lib/skills";
-import {
-	atomicWriteFile,
-	sha256,
-	type WorkspaceAccess,
-	WorkspaceBoundary,
-} from "../lib/workspace-boundary";
+import { sha256, type WorkspaceAccess, WorkspaceBoundary } from "../lib/workspace-boundary";
 import { logger } from "./logger";
 import { modelRouter } from "./model-router";
 
@@ -118,12 +125,16 @@ export interface LLMService {
 		available: boolean;
 		reason?: string;
 	}>;
+	listModels(
+		provider?: SupportedProvider,
+	): Promise<Array<{ id: string; provider: string; label: string }>>;
 	addAllowedPath(path: string): void;
 }
 
 const DEFAULT_SYSTEM_PROMPT = [
 	"You are Night Code, a terminal-first coding agent.",
 	"Operate as a senior engineer inside the active workspace.",
+	"Continue authorized work through implementation and focused verification. Respect the user's scope and explicit requests to pause or plan. Ask only when missing information changes the outcome or runtime approval is required.",
 	"Inspect exact local context before changing behavior. Use dedicated read, search, and patch tools instead of guessing or using shell for routine file access.",
 	"For non-trivial work, call updateTaskPlan before mutation and keep exactly one item in_progress until verification is complete.",
 	"Use applyPatch for edits. It validates the complete batch and rolls back partial failure.",
@@ -202,11 +213,13 @@ export function decideToolApproval(input: ToolApprovalPolicyInput): ToolApproval
 	return { type: "approved" };
 }
 
-type AgentStreamPart = { type: string; [key: string]: unknown };
+type AgentStreamPart = TextStreamPart<ToolSet>;
 type PendingRun = {
 	sessionId: string;
 	config: LLMConfig;
 	messages: ModelMessage[];
+	instructions?: string;
+	toolSignature?: string;
 	approvals: Map<string, PendingApproval>;
 	decisions: Map<string, ApprovalDecision>;
 };
@@ -316,10 +329,12 @@ function initialConfig(
 	policy: RuntimePolicy,
 ): LLMConfig {
 	const projectModelAllowed = process.env.NIGHTCODE_ALLOW_PROJECT_MODEL === "true";
+	const selectedProvider = process.env.NIGHTCODE_PROVIDER as SupportedProvider | undefined;
 	const model =
 		process.env.NIGHTCODE_MODEL ??
 		(projectModelAllowed ? projectConfig.config.model : undefined) ??
-		"gpt-5.6";
+		getDefaultModelForProvider(selectedProvider ?? "openai") ??
+		"gpt-6-astra";
 	const inferredProvider = getProviderForModel(model);
 	return llmConfigSchema.parse({
 		provider: process.env.NIGHTCODE_PROVIDER ?? inferredProvider ?? "openai",
@@ -332,7 +347,11 @@ function initialConfig(
 		agentMode: process.env.NIGHTCODE_AGENT_MODE
 			? process.env.NIGHTCODE_AGENT_MODE !== "false"
 			: true,
-		reasoningEffort: process.env.NIGHTCODE_REASONING_EFFORT,
+		reasoningEffort:
+			process.env.NIGHTCODE_REASONING_EFFORT === "minimal"
+				? "low"
+				: process.env.NIGHTCODE_REASONING_EFFORT,
+		textVerbosity: process.env.NIGHTCODE_TEXT_VERBOSITY,
 		approvalMode: policy.approvalMode,
 	});
 }
@@ -374,14 +393,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
-}
-
-function textDelta(part: AgentStreamPart): string {
-	for (const key of ["text", "delta", "textDelta"] as const) {
-		const value = part[key];
-		if (typeof value === "string") return value;
-	}
-	return "";
 }
 
 function serialize(value: unknown): string {
@@ -520,6 +531,10 @@ export class NightcodeLLMService implements LLMService {
 		return modelRouter.getAvailableProviders();
 	}
 
+	listModels(provider?: SupportedProvider) {
+		return modelRouter.listModels(provider);
+	}
+
 	async undoLastPatch(abortSignal?: AbortSignal): Promise<string> {
 		return this.#runWorkspaceMutation(() => this.#undoLastPatchUnlocked(), abortSignal);
 	}
@@ -528,7 +543,7 @@ export class NightcodeLLMService implements LLMService {
 		const snapshots = this.#changeHistory.pop();
 		if (!snapshots) return "No Night Code patch checkpoint is available.";
 		try {
-			await restorePatch(snapshots);
+			await restorePatch(snapshots, this.#boundary);
 		} catch (error) {
 			this.#changeHistory.push(snapshots);
 			throw error;
@@ -663,17 +678,17 @@ export class NightcodeLLMService implements LLMService {
 			reason: item.reason,
 		}));
 		this.#pendingRun = null;
-		const continuation = [
-			...pending.messages,
-			{ role: "tool" as const, content },
-		] as ModelMessage[];
+		const continuation: ModelMessage[] = [...pending.messages, { role: "tool" as const, content }];
 		this.#activeRun = true;
 		try {
 			yield approvalResponseChunk(decision);
-			yield* this.#execute(continuation, pending.config, {
-				...options,
-				sessionId: options.sessionId ?? pending.sessionId,
-			});
+			yield* this.#execute(
+				continuation,
+				pending.config,
+				{ ...options, sessionId: options.sessionId ?? pending.sessionId },
+				pending.instructions,
+				pending.toolSignature,
+			);
 		} finally {
 			this.#activeRun = false;
 		}
@@ -687,13 +702,15 @@ export class NightcodeLLMService implements LLMService {
 	}
 
 	#runWorkspaceMutation<T>(operation: () => Promise<T>, abortSignal?: AbortSignal): Promise<T> {
-		return workspaceMutationCoordinator.run(this.#workspaceRoot, operation, abortSignal);
+		return workspaceMutationCoordinator.run(this.#boundary.configuredRoots, operation, abortSignal);
 	}
 
 	async *#execute(
 		messages: ModelMessage[],
 		config: LLMConfig,
 		options: StreamOptions,
+		initialInstructions?: string,
+		initialToolSignature?: string,
 	): AsyncGenerator<LLMStreamChunk> {
 		const runController = new AbortController();
 		let deadlineReached = false;
@@ -720,15 +737,14 @@ export class NightcodeLLMService implements LLMService {
 			timestamp: new Date().toISOString(),
 		});
 
-		yield decorate({
-			type: "run-start",
-			version: 1,
-			sessionId: metadata.sessionId,
-			workspace: this.#workspaceRoot,
-		});
-
 		let mcp: ConnectedMCPTools | undefined;
 		try {
+			yield decorate({
+				type: "run-start",
+				version: 1,
+				sessionId: metadata.sessionId,
+				workspace: this.#workspaceRoot,
+			});
 			if (runController.signal.aborted) throw runController.signal.reason;
 			await refreshRepositoryIndex(this.#workspaceRoot, {
 				abortSignal: runController.signal,
@@ -749,7 +765,29 @@ export class NightcodeLLMService implements LLMService {
 			}
 			if (runController.signal.aborted) throw runController.signal.reason;
 			const query = latestUserQuery(messages);
-			const agent = this.#createAgent(config, metadata, mcp?.tools, query, mcp?.warnings);
+			const loopControl = createLoopControl(config.agentMode ? this.#policy.maxAgentSteps : 1);
+			const modelLimits = await modelRouter.getModelLimits(config, runController.signal);
+			let preparedHistory = messages;
+			let preparedResponseCount = 0;
+			let preparedInstructions = initialInstructions;
+			let preparedToolSignature = initialToolSignature;
+			const agent = await this.#createAgent(
+				config,
+				metadata,
+				loopControl,
+				modelLimits,
+				(history, responseCount, instructions, toolSignature) => {
+					preparedHistory = history;
+					preparedResponseCount = responseCount;
+					preparedInstructions = instructions;
+					preparedToolSignature = toolSignature;
+				},
+				mcp?.tools,
+				query,
+				mcp?.warnings,
+				initialInstructions,
+				initialToolSignature,
+			);
 			const result = await agent.stream({
 				messages,
 				abortSignal: runController.signal,
@@ -767,40 +805,48 @@ export class NightcodeLLMService implements LLMService {
 			const approvals = new Map<string, PendingApproval>();
 			let finishUsage: LanguageModelUsage | undefined;
 			let finishReason: string | undefined;
-			for await (const rawPart of result.stream) {
-				const part = rawPart as AgentStreamPart;
+			for await (const part of result.stream) {
+				let approvalReason: string | undefined;
 				if (part.type === "tool-approval-request") {
-					const toolCall = isRecord(part.toolCall) ? part.toolCall : {};
-					const id = typeof part.approvalId === "string" ? part.approvalId : crypto.randomUUID();
-					const toolName = typeof toolCall.toolName === "string" ? toolCall.toolName : "unknown";
+					// The SDK also emits these for automatic policy decisions. They
+					// already resolve within this run and must not pause the session.
+					if (part.isAutomatic) continue;
+					const { toolCall, approvalId: id } = part;
+					const { toolName, toolCallId } = toolCall;
 					const args = isRecord(toolCall.input) ? toolCall.input : {};
-					const reason = this.#approvalReason(toolName, args, config);
-					if (reason) part.reason = reason;
+					approvalReason = this.#approvalReason(toolName, args, config) ?? part.reason;
 					approvals.set(id, {
 						id,
-						toolCallId: typeof toolCall.toolCallId === "string" ? toolCall.toolCallId : "unknown",
+						toolCallId,
 						toolName,
 						args,
-						reason,
+						reason: approvalReason,
 					});
 				}
 				if (part.type === "finish") {
-					finishUsage = isRecord(part.totalUsage)
-						? (part.totalUsage as LanguageModelUsage)
-						: undefined;
-					finishReason = typeof part.finishReason === "string" ? part.finishReason : undefined;
+					finishUsage = part.totalUsage;
+					finishReason = part.finishReason;
 					continue;
 				}
-				const chunk = this.#toChunk(part, metadata);
-				if (chunk) yield decorate(chunk);
+				const chunk = this.#toChunk(part, metadata, approvalReason);
+				if (chunk) {
+					if (runController.signal.aborted) throw runController.signal.reason;
+					yield decorate(chunk);
+					// Provider errors and aborts are terminal, even if the SDK follows
+					// them with a finish event or closes without throwing.
+					if (chunk.type === "error" || chunk.type === "aborted") return;
+				}
 			}
+			if (runController.signal.aborted) throw runController.signal.reason;
 
 			if (approvals.size > 0) {
-				const responseMessages = (await result.responseMessages) as ModelMessage[];
+				const responseMessages = await result.responseMessages;
 				this.#pendingRun = {
 					sessionId: metadata.sessionId,
 					config,
-					messages: [...messages, ...responseMessages],
+					messages: [...preparedHistory, ...responseMessages.slice(preparedResponseCount)],
+					instructions: requiresAppendOnlyHistory(config) ? preparedInstructions : undefined,
+					toolSignature: requiresAppendOnlyHistory(config) ? preparedToolSignature : undefined,
 					approvals,
 					decisions: new Map(),
 				};
@@ -814,7 +860,10 @@ export class NightcodeLLMService implements LLMService {
 
 			yield decorate({
 				type: "done",
-				finishReason: finishReason ?? "stop",
+				finishReason:
+					(finishReason === "tool-calls" ? loopControl.stopReason : undefined) ??
+					finishReason ??
+					"unknown",
 				usage: usageChunk(finishUsage),
 			});
 		} catch (error) {
@@ -842,6 +891,7 @@ export class NightcodeLLMService implements LLMService {
 				});
 			}
 		} finally {
+			runController.abort(new Error("run stream closed"));
 			clearTimeout(deadline);
 			options.abortSignal?.removeEventListener("abort", forwardAbort);
 			this.#mcpApprovalTools = new Set();
@@ -854,22 +904,27 @@ export class NightcodeLLMService implements LLMService {
 	}
 
 	#providerOptions(config: LLMConfig): Record<string, Record<string, JSONValue>> | undefined {
-		if (config.provider === "openai" || config.provider === "azure") {
-			const providerKey = config.provider === "azure" ? "azure" : "openai";
+		const { reasoningEffort } = resolveModelCallSettings(config);
+		const modelProvider = config.model.includes("/")
+			? config.model.split("/", 1)[0]
+			: config.provider;
+		if (modelProvider === "openai" || modelProvider === "azure") {
+			const providerKey = modelProvider === "azure" ? "azure" : "openai";
 			return {
 				[providerKey]: {
 					store: false,
 					promptCacheKey: `nightcode-${hashWorkspace(this.#workspaceRoot)}`,
-					...(config.reasoningEffort ? { reasoningEffort: config.reasoningEffort } : {}),
+					...(reasoningEffort ? { reasoningEffort } : {}),
+					...(config.textVerbosity ? { textVerbosity: config.textVerbosity } : {}),
 				},
 			};
 		}
-		if (config.provider === "anthropic") {
+		if (modelProvider === "anthropic") {
 			return {
 				anthropic: {
 					cacheControl: { type: "ephemeral", ttl: "5m" },
-					...(config.reasoningEffort && config.reasoningEffort !== "none"
-						? { effort: config.reasoningEffort }
+					...(reasoningEffort && config.reasoningEffort !== "none"
+						? { effort: reasoningEffort }
 						: {}),
 					contextManagement: {
 						edits: [
@@ -895,12 +950,22 @@ export class NightcodeLLMService implements LLMService {
 		return undefined;
 	}
 
-	#createAgent(
+	async #createAgent(
 		config: LLMConfig,
 		metadata: RunMetadata,
+		loopControl: ReturnType<typeof createLoopControl>,
+		modelLimits: { contextWindow: number; maxOutputTokens: number },
+		onPreparedHistory: (
+			messages: ModelMessage[],
+			responseCount: number,
+			instructions: string | undefined,
+			toolSignature: string,
+		) => void,
 		mcpTools: ToolSet = {},
 		query?: string,
 		mcpWarnings: string[] = [],
+		initialInstructions?: string,
+		initialToolSignature?: string,
 	) {
 		const tools =
 			config.agentMode && this.#policy.mode === "BUILD"
@@ -908,19 +973,96 @@ export class NightcodeLLMService implements LLMService {
 				: config.agentMode
 					? this.#tools(config)
 					: {};
+		const toolDefinitions = await Promise.all(
+			Object.entries(tools).map(async ([name, definition]) => ({
+				name,
+				type: definition.type,
+				description: definition.description,
+				inputSchema: await asSchema(definition.inputSchema).jsonSchema,
+				providerOptions: definition.providerOptions,
+				strict: definition.strict,
+			})),
+		);
+		const schemaTokens = estimateLoopTokens(toolDefinitions);
+		const toolSignature = sha256(JSON.stringify(toolDefinitions));
+		const maxOutputTokens = Math.min(config.maxTokens, modelLimits.maxOutputTokens);
+		const appendOnly = requiresAppendOnlyHistory(config);
+		if (
+			appendOnly &&
+			initialToolSignature !== undefined &&
+			initialToolSignature !== toolSignature
+		) {
+			throw Object.assign(
+				new Error(
+					"The available tools changed while approval was pending. Start a new conversation so signed model history is not replayed against a different tool catalog.",
+				),
+				{ code: "MODEL_HISTORY_CHANGED" },
+			);
+		}
+		let frozenInstructions = initialInstructions;
 		return new ToolLoopAgent({
 			id: "nightcode-coding-agent",
 			model: this.#getModel(config),
 			instructions: this.#instructionsWithRuntimeContext(config.systemPrompt, query, mcpWarnings),
-			maxOutputTokens: config.maxTokens,
-			temperature: config.temperature,
+			maxOutputTokens,
+			temperature: resolveModelCallSettings(config).temperature,
 			providerOptions: this.#providerOptions(config),
-			stopWhen: config.agentMode ? stepCountIs(this.#policy.maxAgentSteps) : stepCountIs(1),
+			stopWhen: loopControl.stopWhen,
 			tools,
 			maxRetries: this.#policy.maxRetries,
-			prepareStep: () => ({
-				instructions: this.#instructionsWithRuntimeContext(config.systemPrompt, query, mcpWarnings),
-			}),
+			prepareStep: async ({ messages, responseMessages, stepNumber }) => {
+				const baseInstructions = this.#instructionsWithRuntimeContext(
+					config.systemPrompt,
+					query,
+					mcpWarnings,
+					0,
+				);
+				// Repository maps are optional context. Reserve half the remaining
+				// allowance for conversation before adding them on smaller models.
+				const contextBudget = Math.min(
+					this.#policy.contextBudget,
+					Math.floor(
+						loopHistoryBudget({
+							contextWindow: modelLimits.contextWindow,
+							maxOutputTokens,
+							instructions: baseInstructions,
+							toolSchemaTokens: schemaTokens,
+						}) / 2,
+					),
+				);
+				const instructions =
+					(appendOnly ? frozenInstructions : undefined) ??
+					this.#instructionsWithRuntimeContext(
+						config.systemPrompt,
+						query,
+						mcpWarnings,
+						contextBudget,
+					);
+				if (appendOnly) frozenInstructions = instructions;
+				const budget = loopHistoryBudget({
+					contextWindow: modelLimits.contextWindow,
+					maxOutputTokens,
+					instructions,
+					toolSchemaTokens: schemaTokens,
+				});
+				// Signed Claude reasoning binds earlier history. The provider's native
+				// compaction handles these chains; locally rewriting them invalidates it.
+				const preserveHistory = appendOnly && (stepNumber > 0 || initialInstructions !== undefined);
+				if (preserveHistory && estimateLoopTokens(messages) > budget) {
+					throw new ContextBudgetExceededError();
+				}
+				const compacted = preserveHistory ? messages : compactLoopMessages(messages, budget);
+				onPreparedHistory(compacted, responseMessages.length, instructions, toolSignature);
+				if (compacted !== messages) {
+					logger.info("agent history compacted", {
+						runId: metadata.runId,
+						messagesBefore: messages.length,
+						messagesAfter: compacted.length,
+						historyTokenBudget: budget,
+					});
+				}
+				return { instructions, messages: compacted };
+			},
 			toolApproval: async ({ toolCall }) =>
 				this.#toolApproval(toolCall.toolName, toolCall.input, config),
 			telemetry: {
@@ -954,14 +1096,15 @@ export class NightcodeLLMService implements LLMService {
 		baseInstructions: string | undefined,
 		query?: string,
 		mcpWarnings: string[] = [],
+		contextBudget = this.#policy.contextBudget,
 	): string | undefined {
 		if (!baseInstructions) return baseInstructions;
 		const sections = [baseInstructions];
 		if (this.#taskPlan.items.length > 0) {
 			sections.push(`Current task plan:\n${formatTaskPlan(this.#taskPlan)}`);
 		}
-		if (getSymbolCount(this.#workspaceRoot) > 0) {
-			sections.push(generateRepomap(this.#policy.contextBudget, this.#workspaceRoot, query));
+		if (contextBudget > 0 && getSymbolCount(this.#workspaceRoot) > 0) {
+			sections.push(generateRepomap(contextBudget, this.#workspaceRoot, query));
 		}
 		if (mcpWarnings.length > 0) {
 			sections.push(
@@ -1207,11 +1350,11 @@ export class NightcodeLLMService implements LLMService {
 					this.#runWorkspaceMutation(async () => {
 						ensurePlannedMutation();
 						const file = await authorize(path, "write");
-						const before = file.exists ? await Bun.file(file.canonicalPath).text() : null;
-						await atomicWriteFile(file.canonicalPath, content);
-						const snapshots = [{ path: file.canonicalPath, before, after: content }];
-						this.#changeHistory.push(snapshots);
-						await refreshIndex(snapshots);
+						const result = await applyStructuredPatch(this.#boundary, [
+							{ type: file.exists ? "update" : "create", path, content },
+						]);
+						this.#changeHistory.push(result.snapshots);
+						await refreshIndex(result.snapshots);
 						return `wrote ${file.canonicalPath} (sha256 ${sha256(content)})`;
 					}, abortSignal),
 			}),
@@ -1248,17 +1391,16 @@ export class NightcodeLLMService implements LLMService {
 					this.#runWorkspaceMutation(async () => {
 						ensurePlannedMutation();
 						const file = await authorize(path);
-						const before = await Bun.file(file.canonicalPath).text();
+						const before = await readPatchText(file.canonicalPath);
 						let after = before;
 						for (const edit of edits) {
-							const count = after.split(edit.oldText).length - 1;
-							if (count !== 1) throw new Error(`oldText matched ${count} times in ${path}`);
-							after = after.replace(edit.oldText, edit.newText);
+							after = replaceUniqueText(after, edit.oldText, edit.newText, path);
 						}
-						await atomicWriteFile(file.canonicalPath, after);
-						const snapshots = [{ path: file.canonicalPath, before, after }];
-						this.#changeHistory.push(snapshots);
-						await refreshIndex(snapshots);
+						const result = await applyStructuredPatch(this.#boundary, [
+							{ type: "update", path, content: after, expectedSha256: sha256(before) },
+						]);
+						this.#changeHistory.push(result.snapshots);
+						await refreshIndex(result.snapshots);
 						return `applied ${edits.length} edits to ${file.canonicalPath}`;
 					}, abortSignal),
 			}),
@@ -1460,19 +1602,23 @@ export class NightcodeLLMService implements LLMService {
 		);
 	}
 
-	#toChunk(part: AgentStreamPart, metadata: RunMetadata): LLMStreamChunk | null {
+	#toChunk(
+		part: AgentStreamPart,
+		metadata: RunMetadata,
+		approvalReason?: string,
+	): LLMStreamChunk | null {
 		switch (part.type) {
 			case "start-step":
 				metadata.step++;
 				return { type: "step-start", step: metadata.step };
 			case "text-delta":
-				return { type: "text", text: textDelta(part) };
+				return { type: "text", text: part.text };
 			case "tool-call":
 				return {
 					type: "tool-call",
 					toolCall: {
-						id: typeof part.toolCallId === "string" ? part.toolCallId : undefined,
-						name: typeof part.toolName === "string" ? part.toolName : "unknown",
+						id: part.toolCallId,
+						name: part.toolName,
 						args: isRecord(part.input) ? part.input : {},
 					},
 				};
@@ -1481,23 +1627,23 @@ export class NightcodeLLMService implements LLMService {
 				return {
 					type: "tool-result",
 					toolResult: {
-						id: typeof part.toolCallId === "string" ? part.toolCallId : undefined,
-						toolCallId: typeof part.toolCallId === "string" ? part.toolCallId : undefined,
-						name: typeof part.toolName === "string" ? part.toolName : "unknown",
+						id: part.toolCallId,
+						toolCallId: part.toolCallId,
+						name: part.toolName,
 						result: serialize(part.type === "tool-error" ? part.error : part.output),
 						isError: part.type === "tool-error",
 					},
 				};
 			case "tool-approval-request": {
-				const toolCall = isRecord(part.toolCall) ? part.toolCall : {};
+				const { toolCall } = part;
 				return {
 					type: "approval-request",
 					approval: {
-						id: typeof part.approvalId === "string" ? part.approvalId : "unknown",
-						toolCallId: typeof toolCall.toolCallId === "string" ? toolCall.toolCallId : "unknown",
-						toolName: typeof toolCall.toolName === "string" ? toolCall.toolName : "unknown",
+						id: part.approvalId,
+						toolCallId: toolCall.toolCallId,
+						toolName: toolCall.toolName,
 						args: isRecord(toolCall.input) ? toolCall.input : {},
-						reason: typeof part.reason === "string" ? part.reason : undefined,
+						reason: approvalReason ?? part.reason,
 					},
 				};
 			}
@@ -1505,27 +1651,27 @@ export class NightcodeLLMService implements LLMService {
 				return {
 					type: "approval-response",
 					approval: {
-						id: typeof part.approvalId === "string" ? part.approvalId : "unknown",
-						approved: part.approved === true,
-						reason: typeof part.reason === "string" ? part.reason : undefined,
+						id: part.approvalId,
+						approved: part.approved,
+						reason: part.reason,
 					},
 				};
 			case "finish-step":
 				return {
 					type: "step-finish",
 					step: Math.max(0, metadata.step),
-					finishReason: typeof part.finishReason === "string" ? part.finishReason : "unknown",
+					finishReason: part.finishReason,
 					usage: usageChunk(part.usage),
 				};
 			case "abort":
 				return {
 					type: "aborted",
-					reason: typeof part.reason === "string" ? part.reason : undefined,
+					reason: part.reason,
 				};
 			case "error":
 				return {
 					type: "error",
-					error: errorMessage(part.error ?? part.errorText),
+					error: errorMessage(part.error),
 					code: "MODEL_STREAM",
 				};
 			default:

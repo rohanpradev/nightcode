@@ -38,6 +38,7 @@ import {
 import { completeToolActivity, type ToolActivity } from "@cli/services/tool-activity";
 import { parseSlashCommand, resolveUserPath } from "@cli/slash-commands";
 import { discoverAgentProfiles } from "@nightcode/server/lib/agent-profiles";
+import { readTextPrefix } from "@nightcode/server/lib/bounded-files";
 import {
 	clearRepositoryIndex,
 	compactMessages,
@@ -47,11 +48,7 @@ import {
 } from "@nightcode/server/lib/context-engine";
 import { discoverLspServers } from "@nightcode/server/lib/lsp-config";
 import { discoverSkills } from "@nightcode/server/lib/skills";
-import {
-	findSupportedChatModel,
-	getProviderForModel,
-	supportedChatModels,
-} from "@nightcode/shared";
+import { findSupportedChatModel, getProviderForModel } from "@nightcode/shared";
 import {
 	type CliRenderer,
 	createCliRenderer,
@@ -305,7 +302,7 @@ function App({
 
 	const handleSetModel = useCallback(
 		(newModel: string) => {
-			const inferredProvider = provider === "azure" ? undefined : getProviderForModel(newModel);
+			const inferredProvider = getProviderForModel(newModel);
 			const nextProvider = inferredProvider ?? provider;
 			llm.configure({ provider: nextProvider, model: newModel });
 			setProvider(nextProvider);
@@ -416,37 +413,33 @@ function App({
 		systemMessage(lines.join("\n"));
 	}, [tokenUsage, provider, model, systemMessage]);
 
-	const handleShowModels = useCallback(() => {
-		const knownModels = supportedChatModels.filter((entry) => entry.provider === provider);
+	const handleShowModels = useCallback(async () => {
 		if (provider === "azure") {
 			systemMessage(
 				[
 					"\u2500\u2500\u2500 Models \u2500\u2500\u2500",
-					"  Azure uses your deployment name as the model id.",
-					`  Current deployment: ${model}`,
-					"  Set with /model <deployment-id>.",
+					"  Direct Azure deployments are no longer supported.",
+					"  Switch with /provider openai or /provider anthropic.",
+					"  Then select a Vercel AI Gateway model with /model <provider/model>.",
 				].join("\n"),
 			);
 			return;
 		}
+		const knownModels = await llm.listModels(provider);
 
 		if (knownModels.length === 0) {
-			systemMessage(`No known models registered for ${provider}. Use /model <model-id>.`);
+			systemMessage(`No ${provider} models are currently listed by Vercel AI Gateway.`);
 			return;
 		}
 
 		const lines = [
 			"\u2500\u2500\u2500 Models \u2500\u2500\u2500",
 			...knownModels.map((entry) => {
-				const active = entry.id === model ? "*" : " ";
-				const fallback = entry.defaultForProvider ? " default" : "";
-				const price = entry.pricing
-					? ` $${entry.pricing.inputUsdPerMillionTokens}/M in, $${entry.pricing.outputUsdPerMillionTokens}/M out`
-					: " pricing n/a";
-				return `  ${active} ${entry.id.padEnd(24)} ${entry.label}${fallback};${price}`;
+				const active = entry.id === model || entry.id.endsWith(`/${model}`) ? "*" : " ";
+				return `  ${active} ${entry.id} — ${entry.label}`;
 			}),
 			"",
-			"Use /model <model-id> to switch.",
+			"Use /model <provider/model> to switch.",
 		];
 		systemMessage(lines.join("\n"));
 	}, [model, provider, systemMessage]);
@@ -605,13 +598,7 @@ function App({
 		} else {
 			checks.push(`  \u2717 Active provider (${provider}) is not available`);
 			checks.push(
-				`  Configure ${
-					provider === "anthropic"
-						? "ANTHROPIC_API_KEY"
-						: provider === "openai"
-							? "OPENAI_API_KEY"
-							: "AZURE_API_KEY"
-				} before sending requests.`,
+				"  Configure AI_GATEWAY_API_KEY (or VERCEL_OIDC_TOKEN on Vercel) before sending requests.",
 			);
 		}
 		checks.push("");
@@ -946,10 +933,10 @@ function App({
 			}
 
 			if (name === "provider") {
-				if (["azure", "anthropic", "openai"].includes(arg)) {
+				if (["anthropic", "openai"].includes(arg)) {
 					handleSetProvider(arg as LLMProvider);
 				} else {
-					systemMessage(`Unknown provider "${arg || "(empty)"}". Use: azure, anthropic, openai`);
+					systemMessage(`Unsupported provider "${arg || "(empty)"}". Use: anthropic, openai`);
 				}
 				return;
 			}
@@ -967,14 +954,7 @@ function App({
 						return;
 					}
 
-					const file = Bun.file(resolvedPath);
-					const content = await file.text();
-					const pinnedContent =
-						content.length > MAX_PINNED_FILE_CHARS
-							? `${content.slice(0, MAX_PINNED_FILE_CHARS)}\n\n[truncated ${
-									content.length - MAX_PINNED_FILE_CHARS
-								} chars]`
-							: content;
+					const pinnedContent = await readTextPrefix(resolvedPath, MAX_PINNED_FILE_CHARS);
 					setFileContext((prev) => new Map(prev).set(resolvedPath, pinnedContent));
 					systemMessage(
 						`\u2713 Added ${resolvedPath} to context (${pinnedContent.length.toLocaleString()} chars)`,
@@ -1170,10 +1150,17 @@ async function main(): Promise<void> {
 	);
 
 	if (isUiSmokeCommand()) {
-		setTimeout(() => {
+		const finishSmoke = async () => {
 			renderer.destroy();
+			await renderer.closed;
 			process.stdout.write(`\nNightcode UI smoke OK: ${startup.workspace.root}\n`);
 			process.exit(0);
+		};
+		setTimeout(() => {
+			void finishSmoke().catch((error) => {
+				console.error(error);
+				process.exit(1);
+			});
 		}, uiSmokeMs());
 	}
 }

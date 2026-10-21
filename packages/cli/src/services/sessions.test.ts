@@ -107,4 +107,43 @@ describe("stored sessions", () => {
 			id: "persisted-session",
 		});
 	});
+
+	it("retries a failed legacy import after the source is repaired", async () => {
+		await mkdir(join(nightcodeHome(), ".nightcode"), { recursive: true });
+		await writeFile(sessionStorePath(), "{broken");
+		await expect(listStoredSessions()).rejects.toThrow("Could not import legacy sessions");
+		await writeFile(sessionStorePath(), JSON.stringify([session({ id: "recovered" })]));
+		await expect(loadStoredSession("recovered")).resolves.toMatchObject({ id: "recovered" });
+	});
+
+	it("does not overwrite newer history with a delayed stale save", async () => {
+		await saveStoredSession(session({ id: "newer", updatedAt: 20, title: "Latest" }));
+		await saveStoredSession(session({ id: "newer", updatedAt: 10, title: "Stale" }));
+		await expect(loadStoredSession("newer")).resolves.toMatchObject({
+			updatedAt: 20,
+			title: "Latest",
+		});
+	});
+
+	it("rolls back a save when retention fails", async () => {
+		await saveStoredSession(session({ id: "existing", updatedAt: 1 }));
+		const { Database } = await import("bun:sqlite");
+		const sqlite = new Database(join(nightcodeHome(), ".nightcode", "nightcode.db"));
+		try {
+			// Inject a real SQLite failure after the upsert, inside retention.
+			sqlite.run(
+				"CREATE TRIGGER reject_retention BEFORE DELETE ON sessions BEGIN SELECT RAISE(ABORT, 'retention failed'); END",
+			);
+			const insert = sqlite.prepare(
+				"INSERT INTO sessions (id, title, createdAt, updatedAt) VALUES (?, '', 0, 0)",
+			);
+			for (let i = 0; i < 99; i++) insert.run(`filler-${i}`);
+			await expect(
+				saveStoredSession(session({ id: "must-rollback", updatedAt: 100 })),
+			).rejects.toThrow("retention failed");
+			expect(sqlite.query("SELECT id FROM sessions WHERE id = 'must-rollback'").get()).toBeNull();
+		} finally {
+			sqlite.close();
+		}
+	});
 });

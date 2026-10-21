@@ -70,30 +70,39 @@ function hasExternalPathSyntax(command: string): boolean {
 	);
 }
 
-function isReadOnlyInspection(command: string): boolean {
-	if (hasExternalPathSyntax(command)) return false;
-	if (
-		/--(?:ext-diff|textconv|open-files-in-pager|output)(?:\b|=)/i.test(command) ||
-		/\s--paginate\b/i.test(command)
-	) {
-		return false;
+function readOnlyGitArguments(command: string): string[] | undefined {
+	if (hasExternalPathSyntax(command) || /[\r\n\0\u2028\u2029]/.test(command)) return;
+	// Keep the unattended grammar deliberately small. These arguments are passed
+	// directly to Git, so neither shell expansion nor grouped mutation flags apply.
+	const tokens = command.match(/'[^']*'|"[^"$`]*"|[^\s'"]+/g);
+	if (!tokens || tokens.join(" ") !== command.trim().replace(/\s+/g, " ")) return;
+	const args = tokens.map((token) => token.replace(/^(['"])(.*)\1$/, "$2"));
+	if (args.shift() !== "git") return;
+	const subcommand = args[0];
+	if (subcommand === "status") {
+		const safeStatusFlag =
+			/^(?:--(?:short|branch|show-stash|long|null|no-renames)|-[sbz]|--porcelain(?:=v?[12])?|--untracked-files(?:=(?:no|normal|all))?|--ignored(?:=(?:traditional|no|matching))?|--ignore-submodules(?:=(?:none|untracked|dirty|all))?|--column(?:=(?:always|never|auto))?|--no-column|-u(?:no|normal|all)?)$/;
+		return args.slice(1).every((arg) => safeStatusFlag.test(arg)) ? args : undefined;
 	}
-	if (/^\s*git\s+status(?:\s|$)/i.test(command)) return true;
-
-	const branch = command.match(/^\s*git\s+branch(?:\s+(.*))?$/i);
-	if (!branch) return false;
-	const args = branch[1]?.trim() ?? "";
-	if (!args || args === "--show-current") return true;
-	if (!/(?:^|\s)--list(?:\s|=|$)/i.test(args)) return false;
-	return !/(?:^|\s)(?:-[dDmMcCuUf]|--(?:delete|move|copy|create-reflog|edit-description|set-upstream-to|unset-upstream|track|no-track|force))(?:\s|=|$)/i.test(
-		args,
-	);
+	if (subcommand !== "branch") return;
+	const flags = args.slice(1);
+	if (flags.length === 0 || (flags.length === 1 && flags[0] === "--show-current")) return args;
+	if (!flags.includes("--list")) return;
+	const safeBranchFlag = /^(?:--(?:list|all|remotes|verbose|no-color|no-column)|-(?:a|r|v|vv))$/;
+	return flags.every((arg) =>
+		arg.startsWith("-") ? safeBranchFlag.test(arg) : /^[\w./*?[\]@{}!+,-]+$/.test(arg),
+	)
+		? args
+		: undefined;
 }
 
 export function assessShellCommand(
 	command: string,
 	approvalMode: ApprovalMode = "on-risk",
 ): CommandAssessment {
+	// Newlines are command separators in both supported shells. Do not erase
+	// them before deciding whether the entire input is a read-only command.
+	const hasCommandSeparator = /[\r\n\0\u2028\u2029]/.test(command);
 	const normalized = command.replace(/\s+/g, " ").trim();
 	if (!normalized) {
 		return {
@@ -129,7 +138,8 @@ export function assessShellCommand(
 		};
 	}
 
-	let risk: CommandRisk = isReadOnlyInspection(normalized) ? "low" : "medium";
+	let risk: CommandRisk =
+		!hasCommandSeparator && readOnlyGitArguments(normalized) ? "low" : "medium";
 	let reason = risk === "low" ? "read-only workspace inspection" : "general shell execution";
 	for (const [pattern, matchReason] of MEDIUM_RISK_PATTERNS) {
 		if (pattern.test(normalized)) {
@@ -258,13 +268,19 @@ export async function runShellCommand(options: RunShellOptions): Promise<string>
 	);
 
 	try {
-		const proc = Bun.spawn(shellCommand(options.command), {
-			cwd: options.cwd,
-			env: await createToolEnvironment(options.workspaceRoot),
-			stdout: "pipe",
-			stderr: "pipe",
-			signal: controller.signal,
-		});
+		const readOnlyArgs = readOnlyGitArguments(options.command.trim().replace(/[\t ]+/g, " "));
+		const proc = Bun.spawn(
+			readOnlyArgs
+				? ["git", "--no-pager", "-c", "core.fsmonitor=false", ...readOnlyArgs]
+				: shellCommand(options.command),
+			{
+				cwd: options.cwd,
+				env: await createToolEnvironment(options.workspaceRoot),
+				stdout: "pipe",
+				stderr: "pipe",
+				signal: controller.signal,
+			},
+		);
 		const [stdout, stderr, exitCode] = await Promise.all([
 			readLimited(proc.stdout, options.maxOutputChars),
 			readLimited(proc.stderr, options.maxOutputChars),

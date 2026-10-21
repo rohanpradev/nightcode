@@ -113,8 +113,17 @@ async function importLegacySessions(
 
 	let sessions: StoredSession[] = [];
 	try {
-		sessions = parseStoredSessions(JSON.parse(await readFile(legacySessionFilePath(), "utf8")));
-	} catch {}
+		const value: unknown = JSON.parse(await readFile(legacySessionFilePath(), "utf8"));
+		if (!Array.isArray(value)) throw new Error("Expected an array of sessions");
+		sessions = parseStoredSessions(value);
+	} catch (error) {
+		if (!(error && typeof error === "object" && "code" in error && error.code === "ENOENT")) {
+			throw new Error(
+				`Could not import legacy sessions from ${legacySessionFilePath()}. Repair the file and retry.`,
+				{ cause: error },
+			);
+		}
+	}
 
 	const insert = sqlite.prepare(`
 		INSERT INTO sessions (id, workspace, title, createdAt, updatedAt, messages, fileContext, version)
@@ -190,8 +199,9 @@ export async function loadLatestStoredSession(cwd?: string): Promise<StoredSessi
 export async function saveStoredSession(session: StoredSession): Promise<void> {
 	const normalized = storedSessionSchema.parse({ ...session, cwd: resolve(session.cwd) });
 	await withSessionDatabase((sqlite) => {
-		sqlite.run(
-			`INSERT INTO sessions (id, workspace, title, createdAt, updatedAt, messages, fileContext, version)
+		const save = sqlite.transaction(() => {
+			sqlite.run(
+				`INSERT INTO sessions (id, workspace, title, createdAt, updatedAt, messages, fileContext, version)
 			 VALUES (?, ?, ?, ?, ?, ?, ?, 1)
 			 ON CONFLICT(id) DO UPDATE SET
 				workspace = excluded.workspace,
@@ -199,20 +209,23 @@ export async function saveStoredSession(session: StoredSession): Promise<void> {
 				updatedAt = excluded.updatedAt,
 				messages = excluded.messages,
 				fileContext = excluded.fileContext,
-				version = excluded.version`,
-			[
-				normalized.id,
-				normalized.cwd,
-				normalized.title,
-				normalized.createdAt,
-				normalized.updatedAt,
-				JSON.stringify(normalized.messages),
-				JSON.stringify(normalized.fileContext),
-			],
-		);
-		sqlite.run(
-			"DELETE FROM sessions WHERE id NOT IN (SELECT id FROM sessions ORDER BY updatedAt DESC LIMIT ?)",
-			[SESSION_LIMIT],
-		);
+				version = excluded.version
+			 WHERE excluded.updatedAt >= sessions.updatedAt`,
+				[
+					normalized.id,
+					normalized.cwd,
+					normalized.title,
+					normalized.createdAt,
+					normalized.updatedAt,
+					JSON.stringify(normalized.messages),
+					JSON.stringify(normalized.fileContext),
+				],
+			);
+			sqlite.run(
+				"DELETE FROM sessions WHERE id NOT IN (SELECT id FROM sessions ORDER BY updatedAt DESC LIMIT ?)",
+				[SESSION_LIMIT],
+			);
+		});
+		save();
 	});
 }

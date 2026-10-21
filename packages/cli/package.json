@@ -11,20 +11,19 @@
 		"build": "bun run scripts/build.ts bundle",
 		"build:compile": "bun run scripts/build.ts compile",
 		"build:bytecode": "bun run scripts/build.ts bytecode",
-		"typecheck": "bunx --no-install --bun tsc --noEmit --checkers 8 -p tsconfig.json"
+		"typecheck": "bun check --project tsconfig.json"
 	},
 	"devDependencies": {
-		"@types/bun": "latest",
-		"@types/react": "^19.2.17"
+		"@types/react": "^19.3.0"
 	},
 	"dependencies": {
 		"@nightcode/database": "workspace:*",
 		"@nightcode/server": "workspace:*",
 		"@nightcode/shared": "workspace:*",
-		"@opentui/core": "^0.4.2",
-		"@opentui/react": "^0.4.2",
-		"hono": "^4.12.27",
-		"react": "^19.2.7",
-		"zod": "^4.4.3"
+		"@opentui/core": "0.6.6",
+		"@opentui/react": "0.6.6",
+		"hono": "^4.13.13",
+		"react": "^19.3.1",
+		"zod": "^4.6.7"
 	}
 }

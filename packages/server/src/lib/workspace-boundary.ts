@@ -87,6 +87,10 @@ export class WorkspaceBoundary {
 		];
 	}
 
+	get configuredRoots(): string[] {
+		return [...this.#configuredRoots];
+	}
+
 	addRoot(path: string): void {
 		const expanded = expandHome(path);
 		this.#configuredRoots.push(
@@ -134,28 +138,21 @@ export async function atomicWriteFile(path: string, content: string): Promise<vo
 	await mkdir(dirname(path), { recursive: true });
 	const suffix = `${process.pid}.${Date.now()}.${crypto.randomUUID()}`;
 	const temp = `${path}.${suffix}.tmp`;
-	const backup = `${path}.${suffix}.bak`;
 	const hadTarget = await exists(path);
 	const targetMode = hadTarget ? (await stat(path)).mode : undefined;
 
-	await writeFile(temp, content, {
-		encoding: "utf8",
-		flag: "wx",
-		...(targetMode !== undefined ? { mode: targetMode } : {}),
-	});
-	if (targetMode !== undefined && process.platform !== "win32") await chmod(temp, targetMode);
 	try {
-		if (hadTarget) await rename(path, backup);
+		await writeFile(temp, content, {
+			encoding: "utf8",
+			flag: "wx",
+			...(targetMode !== undefined ? { mode: targetMode } : {}),
+		});
+		if (targetMode !== undefined && process.platform !== "win32") await chmod(temp, targetMode);
+		// A single rename replaces the destination without a missing-file window.
+		// If replacement fails, the original remains at its original path.
 		await rename(temp, path);
-		// The replacement is committed once temp is renamed into place. A stale
-		// backup cleanup failure must not report the write as failed after commit.
-		if (hadTarget) await rm(backup, { force: true }).catch(() => undefined);
-	} catch (error) {
+	} finally {
 		await rm(temp, { force: true }).catch(() => undefined);
-		if (hadTarget && (await exists(backup)) && !(await exists(path))) {
-			await rename(backup, path).catch(() => undefined);
-		}
-		throw error;
 	}
 }
 

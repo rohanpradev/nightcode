@@ -300,11 +300,8 @@ export async function resolveStartupState(
 
 function providerEnvStatus(): Record<string, boolean> {
 	return {
-		OPENAI_API_KEY: Boolean(process.env.OPENAI_API_KEY?.trim()),
-		ANTHROPIC_API_KEY: Boolean(process.env.ANTHROPIC_API_KEY?.trim()),
-		AZURE_OPENAI_API_KEY: Boolean(process.env.AZURE_OPENAI_API_KEY?.trim()),
-		AZURE_OPENAI_RESOURCE_NAME: Boolean(process.env.AZURE_OPENAI_RESOURCE_NAME?.trim()),
-		AZURE_OPENAI_BASE_URL: Boolean(process.env.AZURE_OPENAI_BASE_URL?.trim()),
+		AI_GATEWAY_API_KEY: Boolean(process.env.AI_GATEWAY_API_KEY?.trim()),
+		VERCEL_OIDC_TOKEN: Boolean(process.env.VERCEL_OIDC_TOKEN?.trim()),
 	};
 }
 

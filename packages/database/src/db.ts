@@ -1,8 +1,11 @@
 import { Database } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { defineRelations } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/bun-sqlite";
 import * as schema from "./schema";
+
+const relations = defineRelations(schema);
 
 export function defaultDatabasePath(): string {
 	if (process.env.DATABASE_URL) return resolve(process.env.DATABASE_URL.replace(/^file:/, ""));
@@ -12,16 +15,21 @@ export function defaultDatabasePath(): string {
 }
 
 export function createNightcodeDatabase(path = defaultDatabasePath()) {
-	mkdirSync(dirname(path), { recursive: true });
+	if (path !== ":memory:") mkdirSync(dirname(resolve(path)), { recursive: true });
 	const sqlite = new Database(path, { create: true, strict: true });
-	configureDatabase(sqlite);
-	initializeDatabase(sqlite);
-	return {
-		path,
-		sqlite,
-		db: drizzle({ client: sqlite, schema }),
-		close: () => sqlite.close(),
-	};
+	try {
+		configureDatabase(sqlite);
+		initializeDatabase(sqlite);
+		return {
+			path,
+			sqlite,
+			db: drizzle({ client: sqlite, relations }),
+			close: () => sqlite.close(),
+		};
+	} catch (error) {
+		sqlite.close();
+		throw error;
+	}
 }
 
 function configureDatabase(sqlite: Database): void {
@@ -36,6 +44,12 @@ function configureDatabase(sqlite: Database): void {
 
 /** Creates and forward-migrates the local runtime schema. */
 export function initializeDatabase(sqlite: Database): void {
+	// Reserve the writer before inspecting columns, avoiding concurrent startup
+	// races and partial upgrades if any statement fails.
+	sqlite.transaction(() => initializeSchema(sqlite)).immediate();
+}
+
+function initializeSchema(sqlite: Database): void {
 	sqlite.run(`
 		CREATE TABLE IF NOT EXISTS sessions (
 			id TEXT PRIMARY KEY,
@@ -53,6 +67,7 @@ export function initializeDatabase(sqlite: Database): void {
 	ensureColumn(sqlite, "sessions", "fileContext", "TEXT NOT NULL DEFAULT '[]'");
 	ensureColumn(sqlite, "sessions", "version", "INTEGER NOT NULL DEFAULT 1");
 	sqlite.run("CREATE INDEX IF NOT EXISTS sessions_userId_idx ON sessions(userId)");
+	sqlite.run("CREATE INDEX IF NOT EXISTS sessions_createdAt_idx ON sessions(createdAt)");
 	sqlite.run("CREATE INDEX IF NOT EXISTS sessions_workspace_idx ON sessions(workspace)");
 	sqlite.run("CREATE INDEX IF NOT EXISTS sessions_updatedAt_idx ON sessions(updatedAt)");
 

@@ -8,11 +8,11 @@
 		"./schemas": "./src/schemas.ts"
 	},
 	"scripts": {
-		"build": "bun build src/index.ts --outdir dist --target bun --minify --sourcemap=external",
-		"typecheck": "bunx --no-install --bun tsc --noEmit --checkers 8 -p tsconfig.json"
+		"build": "bun build --check src/index.ts --outdir dist --target bun --minify --sourcemap=external",
+		"typecheck": "bun check --project tsconfig.json"
 	},
 	"dependencies": {
-		"ai": "7.0.11",
-		"zod": "^4.4.3"
+		"ai": "7.0.146",
+		"zod": "^4.6.7"
 	}
 }

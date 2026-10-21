@@ -68,16 +68,16 @@ export const COMMANDS: CommandItem[] = [
 	},
 	{
 		name: "models",
-		description: "List known models for the active provider",
+		description: "List live Vercel AI Gateway models for the active provider",
 		value: "/models",
 		action: ({ showModels }) => showModels(),
 	},
 	{
 		name: "provider",
-		description: "Switch provider: azure | anthropic | openai",
+		description: "Switch provider: anthropic | openai",
 		value: "/provider",
 		inputTemplate: "/provider ",
-		action: ({ showCommandUsage }) => showCommandUsage("/provider azure|anthropic|openai"),
+		action: ({ showCommandUsage }) => showCommandUsage("/provider anthropic|openai"),
 	},
 	{
 		name: "agent",
@@ -93,7 +93,7 @@ export const COMMANDS: CommandItem[] = [
 	},
 	{
 		name: "compact",
-		description: "Toggle compact mode (condense messages to save tokens)",
+		description: "Toggle compact mode (omit older messages with an explicit notice)",
 		value: "/compact",
 		action: ({ toggleCompact }) => toggleCompact(),
 	},

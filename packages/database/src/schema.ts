@@ -1,4 +1,12 @@
-import { blob, index, integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
+import {
+	blob,
+	index,
+	integer,
+	sqliteTable,
+	text,
+	unique,
+	uniqueIndex,
+} from "drizzle-orm/sqlite-core";
 
 // Sessions
 export const sessions = sqliteTable(
@@ -25,8 +33,31 @@ export const sessions = sqliteTable(
 		index("sessions_userId_idx").on(table.userId),
 		index("sessions_createdAt_idx").on(table.createdAt),
 		index("sessions_workspace_idx").on(table.workspace),
+		index("sessions_updatedAt_idx").on(table.updatedAt),
 	],
 );
+
+export const runEvents = sqliteTable(
+	"run_events",
+	{
+		id: integer().primaryKey({ autoIncrement: true }),
+		sessionId: text().notNull(),
+		runId: text(),
+		sequence: integer().notNull(),
+		type: text().notNull(),
+		payload: text().notNull(),
+		createdAt: integer({ mode: "timestamp_ms" }).notNull(),
+	},
+	(table) => [
+		unique("run_events_runId_sequence_unique").on(table.runId, table.sequence),
+		index("run_events_session_idx").on(table.sessionId, table.createdAt),
+	],
+);
+
+export const metadata = sqliteTable("metadata", {
+	key: text().primaryKey(),
+	value: text().notNull(),
+});
 
 // File Index
 export const fileIndex = sqliteTable(
@@ -35,7 +66,7 @@ export const fileIndex = sqliteTable(
 		id: text()
 			.primaryKey()
 			.$defaultFn(() => generateId()),
-		path: text().notNull().unique(),
+		path: text().notNull(),
 		hash: text().notNull(),
 		language: text().notNull().default("unknown"),
 		symbolCount: integer().notNull().default(0),
@@ -45,6 +76,7 @@ export const fileIndex = sqliteTable(
 	},
 	(table) => [
 		index("file_index_path_idx").on(table.path),
+		uniqueIndex("file_index_path_unique").on(table.path),
 		index("file_index_language_idx").on(table.language),
 	],
 );
@@ -96,7 +128,7 @@ export const toolCacheTable = sqliteTable(
 		id: text()
 			.primaryKey()
 			.$defaultFn(() => generateId()),
-		key: text().notNull().unique(),
+		key: text().notNull(),
 		toolName: text().notNull(),
 		result: text().notNull(),
 		createdAt: integer({ mode: "timestamp_ms" })
@@ -106,6 +138,7 @@ export const toolCacheTable = sqliteTable(
 	},
 	(table) => [
 		index("tool_cache_key_idx").on(table.key),
+		uniqueIndex("tool_cache_key_unique").on(table.key),
 		index("tool_cache_toolName_idx").on(table.toolName),
 		index("tool_cache_expiresAt_idx").on(table.expiresAt),
 	],

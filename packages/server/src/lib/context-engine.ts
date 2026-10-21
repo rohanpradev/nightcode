@@ -3,6 +3,7 @@ import { isAbsolute, relative, resolve } from "node:path";
 import { estimateTokens } from "./cache";
 import { logger } from "./logger";
 import { isSensitivePath } from "./sensitive-path";
+import { WorkspaceBoundary } from "./workspace-boundary";
 
 // Types
 export interface CodeSymbol {
@@ -527,8 +528,9 @@ function scoreFileRelevance(
 	query: string,
 	symbols: CodeSymbol[],
 	fileModTimes: Map<string, number>,
+	relativePath = filePath,
 ): { score: number; reason: string } {
-	const relevance = scoreQueryRelevance(filePath, query, symbols);
+	const relevance = scoreQueryRelevance(relativePath, query, symbols);
 	let score = relevance.score;
 
 	// Recency bonus
@@ -562,35 +564,65 @@ export async function assembleContext(
 	const results: FileContext[] = [];
 	let tokensUsed = 0;
 	const state = repositoryState(config.cwd);
+	const maxTokens = Number.isFinite(config.maxTokens)
+		? Math.min(1_000_000, Math.max(0, Math.floor(config.maxTokens)))
+		: 0;
+	const boundary = new WorkspaceBoundary(config.cwd);
+	const included = new Set<string>();
 
-	// 1. Always include pinned files first
-	for (const pinnedPath of config.pinnedFiles) {
+	const include = async (path: string, relevanceScore: number, reason: string) => {
+		if (tokensUsed >= maxTokens || isSensitivePath(path)) return;
 		try {
-			const file = Bun.file(pinnedPath);
-			if (!(await file.exists())) continue;
-
-			const content = await file.text();
+			// Index entries and pins can be stale or replaced by links between runs.
+			const authorized = await boundary.authorize(path, "read");
+			if (!authorized.exists || isSensitivePath(authorized.canonicalPath)) return;
+			const key = normalizePathForComparison(authorized.canonicalPath);
+			if (included.has(key)) return;
+			const maxChars = Math.min(
+				DEFAULT_MAX_INDEX_FILE_BYTES,
+				Math.floor((maxTokens - tokensUsed) * 3.5),
+			);
+			const file = Bun.file(authorized.canonicalPath);
+			const maxBytes = Math.min(file.size, maxChars * 4 + 4);
+			let content = await file.slice(0, maxBytes).text();
+			if (content.length > maxChars || maxBytes < file.size) {
+				const marker = "\n[truncated; re-read file for more]";
+				if (maxChars < marker.length) return;
+				const prefix = content.slice(0, maxChars - marker.length).replace(/[\uD800-\uDBFF]$/, "");
+				content = `${prefix}${marker}`;
+			}
 			const tokens = estimateTokens(content);
-
+			if (tokensUsed + tokens > maxTokens) return;
 			results.push({
-				path: pinnedPath,
+				path: authorized.canonicalPath,
 				content,
-				relevanceScore: 1.0,
-				reason: "pinned",
+				relevanceScore,
+				reason,
 				tokens,
 			});
-
+			included.add(key);
 			tokensUsed += tokens;
 		} catch {}
+	};
+
+	// Pins have priority, but never grant access or bypass the context budget.
+	for (const pinnedPath of config.pinnedFiles) {
+		await include(pinnedPath, 1, "pinned");
 	}
 
 	// 2. Score all indexed files
 	const candidates: Array<{ path: string; score: number; reason: string }> = [];
 
 	for (const [filePath, symbols] of state.symbolIndex) {
-		if (config.pinnedFiles.includes(filePath)) continue;
+		if (included.has(normalizePathForComparison(filePath))) continue;
 
-		const { score, reason } = scoreFileRelevance(filePath, query, symbols, state.fileModTimes);
+		const { score, reason } = scoreFileRelevance(
+			filePath,
+			query,
+			symbols,
+			state.fileModTimes,
+			relative(config.cwd, filePath),
+		);
 
 		if (score >= config.minRelevance) {
 			candidates.push({ path: filePath, score, reason });
@@ -601,44 +633,8 @@ export async function assembleContext(
 	candidates.sort((a, b) => b.score - a.score || stablePathCompare(a.path, b.path));
 
 	for (const candidate of candidates) {
-		if (tokensUsed >= config.maxTokens) break;
-
-		try {
-			const file = Bun.file(candidate.path);
-			const content = await file.text();
-			const tokens = estimateTokens(content);
-
-			if (tokensUsed + tokens > config.maxTokens) {
-				// Try to include a truncated version
-				const available = config.maxTokens - tokensUsed;
-
-				if (available > 200) {
-					const truncated = content.slice(0, available * 3); // ~3 chars per token
-
-					results.push({
-						path: candidate.path,
-						content: `${truncated}\n\n[... truncated ...]`,
-						relevanceScore: candidate.score,
-						reason: candidate.reason,
-						tokens: available,
-					});
-
-					tokensUsed += available;
-				}
-
-				continue;
-			}
-
-			results.push({
-				path: candidate.path,
-				content,
-				relevanceScore: candidate.score,
-				reason: candidate.reason,
-				tokens,
-			});
-
-			tokensUsed += tokens;
-		} catch {}
+		if (tokensUsed >= maxTokens) break;
+		await include(candidate.path, candidate.score, candidate.reason);
 	}
 
 	timer.stop({ filesIncluded: results.length, tokensUsed });
@@ -648,8 +644,10 @@ export async function assembleContext(
 
 /** Generate a repomap summary (like Aider) - concise file/symbol listing. */
 export function generateRepomap(maxTokens = 4000, root = process.cwd(), query?: string): string {
-	const lines: string[] = ["# Repository Map\n"];
-	let tokens = 50;
+	if (!Number.isFinite(maxTokens) || maxTokens <= 0) return "";
+	const maxChars = Math.floor(maxTokens) * 3.5;
+	let map = "# Repository Map\n";
+	if (map.length > maxChars) return "";
 	const state = repositoryState(root);
 	const hasQuery = Boolean(query?.trim());
 	const files = [...state.symbolIndex.entries()]
@@ -674,7 +672,7 @@ export function generateRepomap(maxTokens = 4000, root = process.cwd(), query?: 
 		});
 
 	for (const { relativePath, symbols } of files) {
-		if (tokens >= maxTokens) break;
+		if (map.length >= maxChars) break;
 
 		const fileHeader = `\n## ${relativePath}`;
 		const symLines = symbols
@@ -682,47 +680,48 @@ export function generateRepomap(maxTokens = 4000, root = process.cwd(), query?: 
 			.map((s) => `${s.kind}: ${s.name}${s.signature ? ` ${s.signature}` : ""}`)
 			.join("\n");
 
-		const entry = `${fileHeader}\n${symLines}`;
-		const entryTokens = estimateTokens(entry);
+		const entry = `\n${fileHeader}\n${symLines}`;
 
-		if (tokens + entryTokens > maxTokens) continue;
+		if (map.length + entry.length > maxChars) continue;
 
-		lines.push(entry);
-		tokens += entryTokens;
+		map += entry;
 	}
 
-	return lines.join("\n");
+	return map;
 }
 
 // Context Window Management
 
 /**
- * Summarize old conversation messages to save context window space.
- * Keeps the last N messages intact and summarizes older ones.
+ * Omit old conversation messages with an explicit note; this is not a summary.
+ * Presentation notices do not consume the recent conversation allowance.
  */
 export function compactMessages(
 	messages: Array<{ role: string; content: string }>,
 	keepLast: number = 6,
-	maxSummaryTokens: number = 2000,
+	// Retained for callers of the former summarization API; no summary is generated.
+	_maxSummaryTokens: number = 2000,
 ): Array<{ role: string; content: string }> {
+	messages = messages.filter((message) => message.role !== "notice" && message.role !== "system");
+	keepLast = Number.isFinite(keepLast) ? Math.max(1, Math.floor(keepLast)) : 6;
 	if (messages.length <= keepLast) return messages;
 
-	const toSummarize = messages.slice(0, messages.length - keepLast);
-	const toKeep = messages.slice(messages.length - keepLast);
+	const omitted = messages.slice(0, messages.length - keepLast);
+	const retained = messages.slice(messages.length - keepLast);
 
-	const omittedTokens = toSummarize.reduce(
+	const omittedTokens = omitted.reduce(
 		(total, message) => total + estimateTokens(message.content),
 		0,
 	);
-	const summary = {
+	const note = {
 		role: "user" as const,
 		content: [
 			"<context-note>",
-			`${toSummarize.length} earlier messages (${Math.min(omittedTokens, maxSummaryTokens).toLocaleString()}+ estimated tokens) were omitted by local compact mode.`,
+			`${omitted.length} earlier messages (${omittedTokens.toLocaleString()} estimated tokens) were omitted by local compact mode.`,
 			"Do not infer their exact contents. Re-read repository state or ask the user when missing details matter.",
 			"</context-note>",
 		].join("\n"),
 	};
 
-	return [summary, ...toKeep];
+	return [note, ...retained];
 }

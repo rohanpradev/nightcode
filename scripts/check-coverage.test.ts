@@ -2,6 +2,23 @@ import { describe, expect, test } from "bun:test";
 import { evaluateCoverage, parseLcovTotals } from "./check-coverage";
 
 describe("coverage gate", () => {
+	test("fails closed when the coverage report has no measurements", () => {
+		expect(evaluateCoverage(parseLcovTotals(""), () => {})).toEqual(["lines", "functions"]);
+	});
+
+	test("rejects impossible hit counts", () => {
+		expect(() =>
+			evaluateCoverage(
+				{
+					functionsFound: 1,
+					functionsHit: 2,
+					linesFound: 10,
+					linesHit: 8,
+				},
+				() => {},
+			),
+		).toThrow("Invalid LCOV");
+	});
 	test("aggregates LCOV records", () => {
 		expect(
 			parseLcovTotals(

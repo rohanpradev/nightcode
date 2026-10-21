@@ -1,10 +1,31 @@
 import { describe, expect, it } from "bun:test";
-import { chmod, mkdir, mkdtemp, stat, symlink, writeFile } from "node:fs/promises";
+import {
+	chmod,
+	mkdir,
+	mkdtemp,
+	readdir,
+	readFile,
+	stat,
+	symlink,
+	writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { atomicWriteFile, WorkspaceBoundary, WorkspaceBoundaryError } from "./workspace-boundary";
 
 describe("WorkspaceBoundary", () => {
+	it("replaces files and cleans temporary files after a failed replacement", async () => {
+		const root = await mkdtemp(join(tmpdir(), "nightcode-atomic-"));
+		const path = join(root, "file.txt");
+		await writeFile(path, "before");
+		await atomicWriteFile(path, "after");
+		expect(await readFile(path, "utf8")).toBe("after");
+		await mkdir(join(root, "directory"));
+		await expect(
+			atomicWriteFile(join(root, "directory"), "cannot replace directory"),
+		).rejects.toThrow();
+		expect((await readdir(root)).sort()).toEqual(["directory", "file.txt"]);
+	});
 	it("authorizes contained files and rejects lexical traversal", async () => {
 		const root = await mkdtemp(join(tmpdir(), "nightcode-boundary-"));
 		await writeFile(join(root, "inside.txt"), "safe");

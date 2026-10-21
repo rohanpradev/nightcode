@@ -16,9 +16,9 @@ Set `NIGHTCODE_ENV_FILE` before launching Night Code; putting it inside a worksp
 effect. A typical user configuration is:
 
 ```dotenv
-OPENAI_API_KEY=sk-...
+AI_GATEWAY_API_KEY=your-vercel-ai-gateway-key
 NIGHTCODE_PROVIDER=openai
-NIGHTCODE_MODEL=gpt-5.6
+NIGHTCODE_MODEL=gpt-6-astra
 NIGHTCODE_MODE=BUILD
 NIGHTCODE_APPROVAL_MODE=on-risk
 NIGHTCODE_MAX_TOKENS=16384
@@ -29,16 +29,41 @@ NIGHTCODE_MAX_TOOL_TIMEOUT_MS=120000
 NIGHTCODE_MAX_RUN_DURATION_MS=900000
 NIGHTCODE_CONTEXT_BUDGET=16000
 NIGHTCODE_REQUIRE_PLAN_FOR_EDITS=true
+NIGHTCODE_REASONING_EFFORT=medium
+NIGHTCODE_TEXT_VERBOSITY=medium
 NIGHTCODE_LOG_LEVEL=info
 NIGHTCODE_TELEMETRY=false
 ```
 
 Additional trusted runtime settings:
 
+`AI_GATEWAY_API_KEY` authenticates with Vercel AI Gateway. Vercel deployments can use the
+automatically supplied `VERCEL_OIDC_TOKEN`; provider-specific OpenAI and Anthropic API keys are
+not needed. Model IDs are sent to Gateway as `provider/model`.
+
+The default OpenAI model is GPT-6 Astra. Select `gpt-6.1-sol` for the current Sol model or
+`gpt-6-luna` for focused, inexpensive work. Explicit legacy model selections are preserved.
+GPT-6 Astra and GPT-6.1 Sol convert `reasoningEffort: none` to `low`; other supported efforts
+are retained. GPT-6 calls with reasoning omit temperature. These requests use the Gateway's
+Responses-compatible OpenAI route for tool calling. Model presence in the public catalog
+does not establish your account's inference entitlement.
+
+Anthropic defaults to `claude-sonnet-5-5`; `claude-opus-5-5` is also bundled. For these models,
+the runtime omits sampling temperature, freezes instructions and tool definitions across an
+approval chain, and preserves signed reasoning history. Complete exchanges may be omitted before
+the first call; subsequent signed history uses native provider compaction. A changed tool schema
+during approval continuation fails explicitly rather than replaying an incompatible signature.
+
+Direct Azure deployment routing was removed with the Gateway migration. For an existing Azure
+configuration, change `NIGHTCODE_PROVIDER` to `openai` or `anthropic`, select a Gateway model ID,
+and configure Gateway authentication. Azure deployment names and provider API keys cannot be used
+as Gateway credentials or model IDs.
+
 | Variable | Purpose |
 |---|---|
-| `NIGHTCODE_TEMPERATURE` | Model sampling temperature |
-| `NIGHTCODE_REASONING_EFFORT` | Provider reasoning-effort hint |
+| `NIGHTCODE_TEMPERATURE` | Model sampling temperature, omitted for GPT-6 reasoning requests |
+| `NIGHTCODE_REASONING_EFFORT` | Provider reasoning-effort hint: `none`, `low`, `medium`, `high`, `xhigh`, or `max` |
+| `NIGHTCODE_TEXT_VERBOSITY` | OpenAI response detail: `low`, `medium`, or `high` |
 | `NIGHTCODE_AGENT_MODE` | Set `false` for a single model response with no tools |
 | `NIGHTCODE_SYSTEM_PROMPT` | User-owned base system prompt |
 | `NIGHTCODE_ALLOW_PROJECT_MODEL` | Set `true` to permit a repository to select its `model` |

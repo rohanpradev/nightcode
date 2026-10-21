@@ -1,14 +1,19 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { tool } from "ai";
 import { MockLanguageModelV4 } from "ai/test";
+import { z } from "zod";
+import * as mcpRuntime from "../lib/mcp-runtime";
+import { workspaceMutationCoordinator } from "../lib/mutation-coordinator";
 import { assessShellCommand } from "../lib/shell-policy";
 import {
 	createLLMService,
 	decideToolApproval,
 	type ToolApprovalPolicyInput,
 } from "./agent-runtime";
+import { modelRouter } from "./model-router";
 
 type MockStreamPart =
 	Awaited<ReturnType<MockLanguageModelV4["doStream"]>>["stream"] extends ReadableStream<infer Part>
@@ -24,7 +29,399 @@ function stream(parts: MockStreamPart[]): ReadableStream<MockStreamPart> {
 	});
 }
 
+function response(toolName?: string, input: unknown = {}, reasoning = false) {
+	return {
+		stream: stream([
+			{ type: "stream-start", warnings: [] },
+			...(reasoning
+				? [
+						{
+							type: "reasoning-start" as const,
+							id: "thought",
+							providerMetadata: { anthropic: { signature: "signed-prefix" } },
+						},
+						{ type: "reasoning-delta" as const, id: "thought", delta: "" },
+						{
+							type: "reasoning-end" as const,
+							id: "thought",
+							providerMetadata: { anthropic: { signature: "signed-prefix" } },
+						},
+					]
+				: []),
+			...(toolName
+				? [
+						{
+							type: "tool-call" as const,
+							toolCallId: toolName,
+							toolName,
+							input: JSON.stringify(input),
+						},
+					]
+				: []),
+			{
+				type: "finish",
+				finishReason: {
+					unified: toolName ? "tool-calls" : "stop",
+					raw: toolName ? "tool_calls" : "stop",
+				},
+				usage: {
+					inputTokens: { total: 3, noCache: 3, cacheRead: 0, cacheWrite: 0 },
+					outputTokens: { total: 1, text: 1, reasoning: 0 },
+				},
+			},
+		]),
+	};
+}
+
 describe("NightcodeLLMService", () => {
+	for (const limited of [false, true]) {
+		it(`reports ${limited ? "step-limit after tool calls" : "natural success at the step limit"}`, async () => {
+			const workspace = await mkdtemp(join(tmpdir(), "nightcode-agent-limit-"));
+			await mkdir(join(workspace, ".nightcode"));
+			await writeFile(join(workspace, ".nightcode", "config.yaml"), "maxAgentSteps: 2\n");
+			const model = new MockLanguageModelV4({
+				doStream: [
+					response("getTaskPlan"),
+					limited ? response("listFiles", { path: "." }) : response(),
+				],
+			});
+			const service = createLLMService({ workspaceRoot: workspace, model });
+			const events = await Array.fromAsync(
+				service.stream([{ role: "user", content: "inspect" }], { agentMode: true }),
+			);
+			expect(model.doStreamCalls).toHaveLength(2);
+			expect(events.at(-1)).toMatchObject({
+				type: "done",
+				finishReason: limited ? "step-limit" : "stop",
+			});
+		});
+	}
+
+	it("uses resolved model limits and clamps the requested output allowance", async () => {
+		const workspace = await mkdtemp(join(tmpdir(), "nightcode-agent-metadata-"));
+		await writeFile(
+			join(workspace, "source.ts"),
+			"export function example() { return 42; }\n".repeat(100),
+		);
+		const limits = spyOn(modelRouter, "getModelLimits").mockResolvedValue({
+			contextWindow: 32_768,
+			maxOutputTokens: 8_192,
+		});
+		try {
+			const model = new MockLanguageModelV4({ doStream: response() });
+			const service = createLLMService({ workspaceRoot: workspace, model });
+			const events = await Array.fromAsync(
+				service.stream([{ role: "user", content: "inspect" }], {
+					model: "other/small-model",
+					agentMode: true,
+				}),
+			);
+			expect(events.at(-1)).toMatchObject({ type: "done", finishReason: "stop" });
+			expect(model.doStreamCalls[0]?.maxOutputTokens).toBe(8_192);
+			expect(limits).toHaveBeenCalledTimes(1);
+		} finally {
+			limits.mockRestore();
+		}
+	});
+
+	it("keeps compacted history across approval continuation without duplicating earlier responses", async () => {
+		const workspace = await mkdtemp(join(tmpdir(), "nightcode-agent-compact-approval-"));
+		await writeFile(join(workspace, ".env"), "TEST_SECRET=approved\n");
+		const limits = spyOn(modelRouter, "getModelLimits").mockResolvedValue({
+			contextWindow: 32_768,
+			maxOutputTokens: 4_096,
+		});
+		try {
+			const model = new MockLanguageModelV4({
+				doStream: [response("getTaskPlan"), response("readFile", { path: ".env" }), response()],
+			});
+			const service = createLLMService({ workspaceRoot: workspace, model });
+			const initial = await Array.fromAsync(
+				service.stream(
+					[
+						{ role: "user", content: "Read the file with approval." },
+						{ role: "assistant", content: `OLD-CONTEXT-${"x".repeat(90_000)}` },
+						{ role: "assistant", content: "recent context one" },
+						{ role: "assistant", content: "recent context two" },
+					],
+					{ agentMode: true },
+				),
+			);
+			const request = initial.find((event) => event.type === "approval-request");
+			if (request?.type !== "approval-request") throw new Error(JSON.stringify(initial));
+			const continuation = await Array.fromAsync(
+				service.resolveApproval({ approvalId: request.approval.id, approved: true }),
+			);
+			expect(continuation.at(-1)).toMatchObject({ type: "done", finishReason: "stop" });
+			const prompt = JSON.stringify(model.doStreamCalls[2]?.prompt);
+			expect(prompt).not.toContain("OLD-CONTEXT-");
+			expect(prompt.match(/"type":"tool-call","toolCallId":"getTaskPlan"/g)).toHaveLength(1);
+			expect(prompt.match(/"type":"tool-call","toolCallId":"readFile"/g)).toHaveLength(1);
+			expect(prompt).toContain("TEST_SECRET=approved");
+		} finally {
+			limits.mockRestore();
+		}
+	});
+
+	for (const modelId of ["anthropic/claude-sonnet-5.5", "anthropic/claude-opus-5.5"]) {
+		it(`preserves signed thinking and instructions through a plan update and approval for ${modelId}`, async () => {
+			const workspace = await mkdtemp(join(tmpdir(), "nightcode-agent-signed-"));
+			await writeFile(join(workspace, ".env"), "APPROVED=1\n");
+			const model = new MockLanguageModelV4({
+				doStream: [
+					response(
+						"updateTaskPlan",
+						{
+							summary: "PLAN-UPDATE-SENTINEL",
+							items: [{ id: "read", title: "Read approved file", status: "in_progress" }],
+						},
+						true,
+					),
+					response("readFile", { path: ".env" }, true),
+					response(),
+				],
+			});
+			const service = createLLMService({ workspaceRoot: workspace, model });
+			const initial = await Array.fromAsync(
+				service.stream([{ role: "user", content: "read the approved file" }], {
+					provider: "anthropic",
+					model: modelId,
+					agentMode: true,
+					temperature: 0.4,
+				}),
+			);
+			const request = initial.find((event) => event.type === "approval-request");
+			if (request?.type !== "approval-request") throw new Error(JSON.stringify(initial));
+			const continuation = await Array.fromAsync(
+				service.resolveApproval({ approvalId: request.approval.id, approved: true }),
+			);
+			expect(continuation.at(-1)).toMatchObject({ type: "done", finishReason: "stop" });
+			expect(model.doStreamCalls).toHaveLength(3);
+			const instructions = model.doStreamCalls.map((call) =>
+				call.prompt.filter((message) => message.role === "system"),
+			);
+			expect(instructions[1]).toEqual(instructions[0]);
+			expect(instructions[2]).toEqual(instructions[0]);
+			for (const call of model.doStreamCalls) expect(call.temperature).toBeUndefined();
+			const beforeApproval = JSON.stringify(model.doStreamCalls[1]?.prompt);
+			const afterApproval = JSON.stringify(model.doStreamCalls[2]?.prompt);
+			expect(beforeApproval).toContain("signed-prefix");
+			expect(afterApproval).toContain("signed-prefix");
+			expect(afterApproval).toContain("PLAN-UPDATE-SENTINEL");
+			expect(afterApproval).toContain("APPROVED=1");
+		});
+	}
+
+	it("rejects a changed MCP tool catalog before executing an approved signed-history continuation", async () => {
+		const workspace = await mkdtemp(join(tmpdir(), "nightcode-agent-signed-mcp-"));
+		let connections = 0;
+		let executions = 0;
+		let closed = 0;
+		const connect = spyOn(mcpRuntime, "connectMCPTools").mockImplementation(async () => ({
+			tools: {
+				mcp_remote_inspect: tool({
+					description: `Remote inspection schema version ${connections++}`,
+					inputSchema: z.object({}),
+					execute: async () => {
+						executions++;
+						return "inspected";
+					},
+				}),
+			},
+			approvalTools: new Set(["mcp_remote_inspect"]),
+			warnings: [],
+			close: async () => {
+				closed++;
+			},
+		}));
+		try {
+			const model = new MockLanguageModelV4({ doStream: response("mcp_remote_inspect", {}, true) });
+			const service = createLLMService({ workspaceRoot: workspace, model });
+			const initial = await Array.fromAsync(
+				service.stream([{ role: "user", content: "inspect" }], {
+					provider: "anthropic",
+					model: "anthropic/claude-sonnet-5.5",
+					agentMode: true,
+				}),
+			);
+			const request = initial.find((event) => event.type === "approval-request");
+			if (request?.type !== "approval-request") throw new Error(JSON.stringify(initial));
+			const continuation = await Array.fromAsync(
+				service.resolveApproval({ approvalId: request.approval.id, approved: true }),
+			);
+			expect(continuation.at(-1)).toMatchObject({ type: "error", code: "MODEL_HISTORY_CHANGED" });
+			expect(model.doStreamCalls).toHaveLength(1);
+			expect(executions).toBe(0);
+			expect(closed).toBe(2);
+		} finally {
+			connect.mockRestore();
+		}
+	});
+
+	it("sends compatible GPT-6 reasoning and sampling settings to the provider", async () => {
+		const workspace = await mkdtemp(join(tmpdir(), "nightcode-agent-gpt6-"));
+		const model = new MockLanguageModelV4({ doStream: response() });
+		const service = createLLMService({ workspaceRoot: workspace, model });
+		const events = await Array.fromAsync(
+			service.stream([{ role: "user", content: "inspect" }], {
+				model: "openai/gpt-6-astra",
+				agentMode: false,
+				reasoningEffort: "none",
+				temperature: 0.3,
+			}),
+		);
+		expect(events.at(-1)).toMatchObject({ type: "done", finishReason: "stop" });
+		expect(model.doStreamCalls[0]?.temperature).toBeUndefined();
+		expect(model.doStreamCalls[0]?.providerOptions).toMatchObject({
+			openai: { reasoningEffort: "low" },
+		});
+	});
+	for (const toolName of ["editFile", "multiEdit", "applyPatch", "writeFile"]) {
+		it(`preserves literal source text through ${toolName} and undo`, async () => {
+			const workspace = await mkdtemp(join(tmpdir(), "nightcode-agent-literal-"));
+			const before = "\uFEFFfirst TARGET last\r\n";
+			const newText = "$$ $& $` $'";
+			const after = `\uFEFFfirst ${newText} last\r\n`;
+			await writeFile(join(workspace, "source.txt"), before);
+			const input =
+				toolName === "multiEdit"
+					? {
+							path: "source.txt",
+							edits: [
+								{ oldText: "TARGET", newText: "INTERMEDIATE" },
+								{ oldText: "INTERMEDIATE", newText },
+							],
+						}
+					: toolName === "applyPatch"
+						? { operations: [{ type: "replace", path: "source.txt", oldText: "TARGET", newText }] }
+						: toolName === "writeFile"
+							? { path: "source.txt", content: after }
+							: { path: "source.txt", oldText: "TARGET", newText };
+			const usage = {
+				inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite: 0 },
+				outputTokens: { total: 1, text: 1, reasoning: 0 },
+			};
+			const calls = [
+				{
+					toolName: "updateTaskPlan",
+					input: { items: [{ id: "edit", title: "edit source", status: "in_progress" }] },
+				},
+				{ toolName, input },
+			];
+			let step = 0;
+			const model = new MockLanguageModelV4({
+				doStream: async () => {
+					const call = calls[step++];
+					return {
+						stream: stream([
+							{ type: "stream-start", warnings: [] },
+							...(call
+								? [
+										{
+											type: "tool-call" as const,
+											toolCallId: `call-${step}`,
+											toolName: call.toolName,
+											input: JSON.stringify(call.input),
+										},
+									]
+								: []),
+							{
+								type: "finish",
+								finishReason: {
+									unified: call ? "tool-calls" : "stop",
+									raw: call ? "tool_calls" : "stop",
+								},
+								usage,
+							},
+						]),
+					};
+				},
+			});
+			const service = createLLMService({ workspaceRoot: workspace, model });
+			const events = await Array.fromAsync(
+				service.stream([{ role: "user", content: "edit source" }], { agentMode: true }),
+			);
+			expect(
+				events.some(
+					(event) =>
+						event.type === "error" || (event.type === "tool-result" && event.toolResult.isError),
+				),
+			).toBe(false);
+			expect(await readFile(join(workspace, "source.txt"), "utf8")).toBe(after);
+			await service.undoLastPatch();
+			expect(await readFile(join(workspace, "source.txt"), "utf8")).toBe(before);
+		});
+	}
+
+	it("coordinates dynamically allowed roots with other workspace mutations", async () => {
+		const workspace = await mkdtemp(join(tmpdir(), "nightcode-agent-root-lock-"));
+		const shared = join(workspace, "shared");
+		const service = createLLMService({ workspaceRoot: join(workspace, "primary") });
+		service.addAllowedPath(shared);
+		let release!: () => void;
+		const gate = new Promise<void>((resolveGate) => {
+			release = resolveGate;
+		});
+		const otherMutation = workspaceMutationCoordinator.run(shared, () => gate);
+		let undoFinished = false;
+		const undo = service.undoLastPatch().then((result) => {
+			undoFinished = true;
+			return result;
+		});
+		try {
+			await Bun.sleep(0);
+			expect(undoFinished).toBe(false);
+		} finally {
+			release();
+			await otherMutation;
+		}
+		expect(await undo).toContain("No Night Code patch checkpoint");
+	});
+
+	it("cleans up abort listeners when closed at the startup event", async () => {
+		const workspace = await mkdtemp(join(tmpdir(), "nightcode-agent-close-"));
+		const service = createLLMService({
+			workspaceRoot: workspace,
+			model: new MockLanguageModelV4(),
+		});
+		const controller = new AbortController();
+		const removeListener = spyOn(controller.signal, "removeEventListener");
+		try {
+			const run = service.stream(
+				[{ role: "user", content: "start" }],
+				{},
+				{ abortSignal: controller.signal },
+			);
+			await run.next();
+			await run.return(undefined);
+			expect(removeListener).toHaveBeenCalled();
+			expect(service.isBusy).toBe(false);
+		} finally {
+			removeListener.mockRestore();
+		}
+	});
+
+	it("never follows a provider stream error with a successful done event", async () => {
+		const workspace = await mkdtemp(join(tmpdir(), "nightcode-agent-error-"));
+		const service = createLLMService({
+			workspaceRoot: workspace,
+			model: new MockLanguageModelV4({
+				doStream: {
+					stream: stream([
+						{ type: "stream-start", warnings: [] },
+						{ type: "error", error: new Error("provider stream failed") },
+					]),
+				},
+			}),
+		});
+		const events = await Array.fromAsync(
+			service.stream([{ role: "user", content: "start" }], { agentMode: false }),
+		);
+		expect(events.at(-1)).toMatchObject({ type: "error" });
+		expect(events.some((event) => event.type === "done")).toBe(false);
+		expect(service.isBusy).toBe(false);
+	});
+
 	it("rejects concurrent runs in the same session", async () => {
 		const workspace = await mkdtemp(join(tmpdir(), "nightcode-agent-busy-"));
 		const service = createLLMService({
@@ -81,7 +478,11 @@ describe("NightcodeLLMService", () => {
 
 		expect(chunks[0]).toMatchObject({ type: "run-start", version: 1, sessionId: "session-test" });
 		expect(chunks.some((chunk) => chunk.type === "text" && chunk.text === "hello")).toBe(true);
-		expect(chunks.at(-1)?.type).toBe("done");
+		expect(chunks.at(-1)).toMatchObject({
+			type: "done",
+			finishReason: "stop",
+			usage: { inputTokens: 3, outputTokens: 1, totalTokens: 4, cachedInputTokens: 0 },
+		});
 		expect(chunks.map((chunk) => chunk.sequence)).toEqual(chunks.map((_, index) => index));
 		const prompt = JSON.stringify(model.doStreamCalls[0]?.prompt);
 		expect(prompt).toContain("hello");
@@ -89,6 +490,38 @@ describe("NightcodeLLMService", () => {
 		expect(prompt).not.toContain("CALLER-SYSTEM-POISON");
 		expect(prompt).not.toContain("UI-NOTICE-POISON");
 		expect(prompt).not.toContain("CALLER-CONFIG-POISON");
+	});
+
+	it("passes current reasoning and verbosity controls to the OpenAI Responses provider", async () => {
+		const model = new MockLanguageModelV4({
+			doStream: {
+				stream: stream([
+					{ type: "stream-start", warnings: [] },
+					{
+						type: "finish",
+						finishReason: { unified: "stop", raw: "stop" },
+						usage: {
+							inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite: 0 },
+							outputTokens: { total: 0, text: 0, reasoning: 0 },
+						},
+					},
+				]),
+			},
+		});
+		const workspace = await mkdtemp(join(tmpdir(), "nightcode-agent-options-"));
+		const service = createLLMService({ workspaceRoot: workspace, model });
+
+		for await (const _chunk of service.stream([{ role: "user", content: "inspect" }], {
+			agentMode: false,
+			reasoningEffort: "max",
+			textVerbosity: "high",
+		})) {
+			// Drain the run so the mock captures provider options.
+		}
+
+		expect(model.doStreamCalls[0]?.providerOptions).toMatchObject({
+			openai: { reasoningEffort: "max", textVerbosity: "high" },
+		});
 	});
 
 	it("resumes a concurrently resolved approval at most once", async () => {
@@ -236,12 +669,17 @@ describe("NightcodeLLMService", () => {
 		const workspace = await mkdtemp(join(tmpdir(), "nightcode-agent-mutations-"));
 		const service = createLLMService({ workspaceRoot: workspace, model });
 
-		for await (const _chunk of service.stream([{ role: "user", content: "write twice" }], {
+		const chunks = [];
+		for await (const chunk of service.stream([{ role: "user", content: "write twice" }], {
 			agentMode: true,
 			approvalMode: "on-risk",
 		})) {
-			// Drain the complete agent run.
+			chunks.push(chunk);
 		}
+
+		expect(chunks.some((chunk) => chunk.type === "approval-request")).toBe(false);
+		expect(chunks.at(-1)).toMatchObject({ type: "done", finishReason: "stop" });
+		expect(service.getPendingApprovals()).toEqual([]);
 
 		const target = join(workspace, "shared.txt");
 		expect(await readFile(target, "utf8")).toBe("second");
@@ -262,6 +700,12 @@ describe("NightcodeLLMService", () => {
 					{ type: "stream-start", warnings: [] },
 					{
 						type: "tool-call",
+						toolCallId: "read-public",
+						toolName: "readFile",
+						input: JSON.stringify({ path: "README.md" }),
+					},
+					{
+						type: "tool-call",
 						toolCallId: "read-secret",
 						toolName: "readFile",
 						input: JSON.stringify({ path: ".env" }),
@@ -272,6 +716,7 @@ describe("NightcodeLLMService", () => {
 		});
 		const workspace = await mkdtemp(join(tmpdir(), "nightcode-agent-secret-"));
 		await writeFile(join(workspace, ".env"), "TOKEN=do-not-read");
+		await writeFile(join(workspace, "README.md"), "Public documentation");
 		const service = createLLMService({ workspaceRoot: workspace, model });
 		const chunks = [];
 		for await (const chunk of service.stream([{ role: "user", content: "read .env" }], {
@@ -286,6 +731,55 @@ describe("NightcodeLLMService", () => {
 			type: "approval-request",
 			approval: { toolName: "readFile", reason: "Read sensitive file: .env" },
 		});
+		expect(chunks.filter((chunk) => chunk.type === "approval-request")).toHaveLength(1);
+		expect(service.getPendingApprovals()).toHaveLength(1);
+		expect(service.getPendingApprovals()[0]?.toolCallId).toBe("read-secret");
+		expect(chunks.at(-1)).toMatchObject({ type: "done", finishReason: "approval-required" });
+	});
+
+	it("does not leave automatically denied tools pending for user approval", async () => {
+		const usage = {
+			inputTokens: { total: 3, noCache: 3, cacheRead: 0, cacheWrite: 0 },
+			outputTokens: { total: 1, text: 1, reasoning: 0 },
+		};
+		const model = new MockLanguageModelV4({
+			doStream: [
+				{
+					stream: stream([
+						{ type: "stream-start", warnings: [] },
+						{
+							type: "tool-call",
+							toolCallId: "read-secret",
+							toolName: "readFile",
+							input: JSON.stringify({ path: ".env" }),
+						},
+						{ type: "finish", finishReason: { unified: "tool-calls", raw: "tool_calls" }, usage },
+					]),
+				},
+				{
+					stream: stream([
+						{ type: "stream-start", warnings: [] },
+						{ type: "finish", finishReason: { unified: "stop", raw: "stop" }, usage },
+					]),
+				},
+			],
+		});
+		const workspace = await mkdtemp(join(tmpdir(), "nightcode-agent-denied-"));
+		await mkdir(join(workspace, ".nightcode"));
+		await writeFile(join(workspace, ".nightcode", "config.yaml"), "approvalMode: never\n");
+		await writeFile(join(workspace, ".env"), "TOKEN=do-not-read");
+		const service = createLLMService({ workspaceRoot: workspace, model });
+		const chunks = await Array.fromAsync(
+			service.stream([{ role: "user", content: "read .env" }], { agentMode: true }),
+		);
+		expect(chunks.some((chunk) => chunk.type === "approval-request")).toBe(false);
+		expect(chunks.find((chunk) => chunk.type === "approval-response")).toMatchObject({
+			approval: { approved: false },
+		});
+		expect(service.getPendingApprovals()).toEqual([]);
+		expect(chunks.at(-1)).toMatchObject({ type: "done", finishReason: "stop" });
+		expect(JSON.stringify(chunks)).not.toContain("TOKEN=do-not-read");
+		expect(JSON.stringify(model.doStreamCalls)).not.toContain("TOKEN=do-not-read");
 	});
 
 	it("enforces repository PLAN mode and ignores an untrusted project model", async () => {

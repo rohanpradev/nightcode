@@ -7,10 +7,11 @@
 		"moduleDetection": "force",
 		"allowJs": true,
 		"types": ["bun"],
-		"typeRoots": ["./node_modules/.bun/node_modules/@types"],
 
 		// Bundler mode
 		"moduleResolution": "bundler",
+		"customConditions": ["bun"],
+		"noUncheckedSideEffectImports": true,
 		"allowImportingTsExtensions": true,
 		"verbatimModuleSyntax": true,
 		"noEmit": true,

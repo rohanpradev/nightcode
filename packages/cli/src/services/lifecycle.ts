@@ -21,22 +21,30 @@ export function setBeforeExit(handler: (() => Promise<void>) | null): void {
 }
 /**
  * Gracefully exit the application:
- * 1. Destroys the renderer (restores terminal from raw mode)
- * 2. Exits the process cleanly
+ * 1. Saves the active session
+ * 2. Destroys the renderer and waits for terminal restoration
+ * 3. Exits the process cleanly
  */
 
 export async function gracefulExit(code = 0): Promise<void> {
 	if (exitInProgress) return;
 	exitInProgress = true;
 	let exitError: unknown;
+	let rendererError: unknown;
 	try {
 		await beforeExit?.();
 	} catch (error) {
 		exitError = error;
 	}
 	if (rendererInstance) {
-		rendererInstance.destroy();
+		const renderer = rendererInstance;
 		rendererInstance = null;
+		try {
+			renderer.destroy();
+			await renderer.closed;
+		} catch (error) {
+			rendererError = error;
+		}
 	}
 	if (exitError) {
 		process.stderr.write(
@@ -45,5 +53,12 @@ export async function gracefulExit(code = 0): Promise<void> {
 			}\n`,
 		);
 	}
-	process.exit(code);
+	if (rendererError) {
+		process.stderr.write(
+			`Nightcode could not restore the terminal: ${
+				rendererError instanceof Error ? rendererError.message : String(rendererError)
+			}\n`,
+		);
+	}
+	process.exit(exitError || rendererError ? 1 : code);
 }

@@ -1,0 +1,696 @@
+{
+	"dialect": "sqlite",
+	"id": "0bb1340a-f2d3-46ca-9ebf-7b771b2ca643",
+	"prevIds": ["00000000-0000-0000-0000-000000000000"],
+	"version": "7",
+	"ddl": [
+		{
+			"name": "code_symbols",
+			"entityType": "tables"
+		},
+		{
+			"type": "text",
+			"notNull": false,
+			"autoincrement": false,
+			"default": null,
+			"generated": null,
+			"name": "id",
+			"table": "code_symbols",
+			"entityType": "columns"
+		},
+		{
+			"columns": ["id"],
+			"nameExplicit": false,
+			"name": "code_symbols_pk",
+			"table": "code_symbols",
+			"entityType": "pks"
+		},
+		{
+			"type": "text",
+			"notNull": true,
+			"autoincrement": false,
+			"default": null,
+			"generated": null,
+			"name": "name",
+			"table": "code_symbols",
+			"entityType": "columns"
+		},
+		{
+			"type": "text",
+			"notNull": true,
+			"autoincrement": false,
+			"default": null,
+			"generated": null,
+			"name": "kind",
+			"table": "code_symbols",
+			"entityType": "columns"
+		},
+		{
+			"type": "text",
+			"notNull": true,
+			"autoincrement": false,
+			"default": null,
+			"generated": null,
+			"name": "file",
+			"table": "code_symbols",
+			"entityType": "columns"
+		},
+		{
+			"type": "integer",
+			"notNull": true,
+			"autoincrement": false,
+			"default": null,
+			"generated": null,
+			"name": "startLine",
+			"table": "code_symbols",
+			"entityType": "columns"
+		},
+		{
+			"type": "integer",
+			"notNull": true,
+			"autoincrement": false,
+			"default": null,
+			"generated": null,
+			"name": "endLine",
+			"table": "code_symbols",
+			"entityType": "columns"
+		},
+		{
+			"type": "text",
+			"notNull": false,
+			"autoincrement": false,
+			"default": null,
+			"generated": null,
+			"name": "parent",
+			"table": "code_symbols",
+			"entityType": "columns"
+		},
+		{
+			"type": "text",
+			"notNull": false,
+			"autoincrement": false,
+			"default": null,
+			"generated": null,
+			"name": "signature",
+			"table": "code_symbols",
+			"entityType": "columns"
+		},
+		{
+			"type": "text",
+			"notNull": false,
+			"autoincrement": false,
+			"default": null,
+			"generated": null,
+			"name": "fileIndexId",
+			"table": "code_symbols",
+			"entityType": "columns"
+		},
+		{
+			"columns": [
+				{
+					"value": "name",
+					"isExpression": false
+				}
+			],
+			"isUnique": false,
+			"where": null,
+			"origin": "manual",
+			"name": "code_symbols_name_idx",
+			"table": "code_symbols",
+			"entityType": "indexes"
+		},
+		{
+			"columns": [
+				{
+					"value": "kind",
+					"isExpression": false
+				}
+			],
+			"isUnique": false,
+			"where": null,
+			"origin": "manual",
+			"name": "code_symbols_kind_idx",
+			"table": "code_symbols",
+			"entityType": "indexes"
+		},
+		{
+			"columns": [
+				{
+					"value": "file",
+					"isExpression": false
+				}
+			],
+			"isUnique": false,
+			"where": null,
+			"origin": "manual",
+			"name": "code_symbols_file_idx",
+			"table": "code_symbols",
+			"entityType": "indexes"
+		},
+		{
+			"columns": ["fileIndexId"],
+			"tableTo": "file_index",
+			"columnsTo": ["id"],
+			"onUpdate": "NO ACTION",
+			"onDelete": "CASCADE",
+			"nameExplicit": false,
+			"name": "code_symbols_fileIndexId_file_index_id_fk",
+			"table": "code_symbols",
+			"entityType": "fks"
+		},
+		{
+			"name": "embeddings",
+			"entityType": "tables"
+		},
+		{
+			"type": "text",
+			"notNull": false,
+			"autoincrement": false,
+			"default": null,
+			"generated": null,
+			"name": "id",
+			"table": "embeddings",
+			"entityType": "columns"
+		},
+		{
+			"columns": ["id"],
+			"nameExplicit": false,
+			"name": "embeddings_pk",
+			"table": "embeddings",
+			"entityType": "pks"
+		},
+		{
+			"type": "text",
+			"notNull": true,
+			"autoincrement": false,
+			"default": null,
+			"generated": null,
+			"name": "filePath",
+			"table": "embeddings",
+			"entityType": "columns"
+		},
+		{
+			"type": "text",
+			"notNull": true,
+			"autoincrement": false,
+			"default": null,
+			"generated": null,
+			"name": "chunk",
+			"table": "embeddings",
+			"entityType": "columns"
+		},
+		{
+			"type": "blob",
+			"notNull": true,
+			"autoincrement": false,
+			"default": null,
+			"generated": null,
+			"name": "vector",
+			"table": "embeddings",
+			"entityType": "columns"
+		},
+		{
+			"type": "integer",
+			"notNull": true,
+			"autoincrement": false,
+			"default": null,
+			"generated": null,
+			"name": "startLine",
+			"table": "embeddings",
+			"entityType": "columns"
+		},
+		{
+			"type": "integer",
+			"notNull": true,
+			"autoincrement": false,
+			"default": null,
+			"generated": null,
+			"name": "endLine",
+			"table": "embeddings",
+			"entityType": "columns"
+		},
+		{
+			"type": "text",
+			"notNull": true,
+			"autoincrement": false,
+			"default": "'text-embedding-3-small'",
+			"generated": null,
+			"name": "model",
+			"table": "embeddings",
+			"entityType": "columns"
+		},
+		{
+			"columns": [
+				{
+					"value": "filePath",
+					"isExpression": false
+				}
+			],
+			"isUnique": false,
+			"where": null,
+			"origin": "manual",
+			"name": "embeddings_filePath_idx",
+			"table": "embeddings",
+			"entityType": "indexes"
+		},
+		{
+			"name": "file_index",
+			"entityType": "tables"
+		},
+		{
+			"type": "text",
+			"notNull": false,
+			"autoincrement": false,
+			"default": null,
+			"generated": null,
+			"name": "id",
+			"table": "file_index",
+			"entityType": "columns"
+		},
+		{
+			"columns": ["id"],
+			"nameExplicit": false,
+			"name": "file_index_pk",
+			"table": "file_index",
+			"entityType": "pks"
+		},
+		{
+			"type": "text",
+			"notNull": true,
+			"autoincrement": false,
+			"default": null,
+			"generated": null,
+			"name": "path",
+			"table": "file_index",
+			"entityType": "columns"
+		},
+		{
+			"type": "text",
+			"notNull": true,
+			"autoincrement": false,
+			"default": null,
+			"generated": null,
+			"name": "hash",
+			"table": "file_index",
+			"entityType": "columns"
+		},
+		{
+			"type": "text",
+			"notNull": true,
+			"autoincrement": false,
+			"default": "'unknown'",
+			"generated": null,
+			"name": "language",
+			"table": "file_index",
+			"entityType": "columns"
+		},
+		{
+			"type": "integer",
+			"notNull": true,
+			"autoincrement": false,
+			"default": "0",
+			"generated": null,
+			"name": "symbolCount",
+			"table": "file_index",
+			"entityType": "columns"
+		},
+		{
+			"type": "integer",
+			"notNull": true,
+			"autoincrement": false,
+			"default": null,
+			"generated": null,
+			"name": "lastIndexed",
+			"table": "file_index",
+			"entityType": "columns"
+		},
+		{
+			"columns": [
+				{
+					"value": "path",
+					"isExpression": false
+				}
+			],
+			"isUnique": true,
+			"where": null,
+			"origin": "manual",
+			"name": "file_index_path_unique",
+			"table": "file_index",
+			"entityType": "indexes"
+		},
+		{
+			"columns": [
+				{
+					"value": "path",
+					"isExpression": false
+				}
+			],
+			"isUnique": false,
+			"where": null,
+			"origin": "manual",
+			"name": "file_index_path_idx",
+			"table": "file_index",
+			"entityType": "indexes"
+		},
+		{
+			"columns": [
+				{
+					"value": "language",
+					"isExpression": false
+				}
+			],
+			"isUnique": false,
+			"where": null,
+			"origin": "manual",
+			"name": "file_index_language_idx",
+			"table": "file_index",
+			"entityType": "indexes"
+		},
+		{
+			"name": "git_commits",
+			"entityType": "tables"
+		},
+		{
+			"type": "text",
+			"notNull": false,
+			"autoincrement": false,
+			"default": null,
+			"generated": null,
+			"name": "id",
+			"table": "git_commits",
+			"entityType": "columns"
+		},
+		{
+			"columns": ["id"],
+			"nameExplicit": false,
+			"name": "git_commits_pk",
+			"table": "git_commits",
+			"entityType": "pks"
+		},
+		{
+			"type": "text",
+			"notNull": true,
+			"autoincrement": false,
+			"default": null,
+			"generated": null,
+			"name": "hash",
+			"table": "git_commits",
+			"entityType": "columns"
+		},
+		{
+			"type": "text",
+			"notNull": true,
+			"autoincrement": false,
+			"default": null,
+			"generated": null,
+			"name": "sessionId",
+			"table": "git_commits",
+			"entityType": "columns"
+		},
+		{
+			"type": "text",
+			"notNull": true,
+			"autoincrement": false,
+			"default": null,
+			"generated": null,
+			"name": "message",
+			"table": "git_commits",
+			"entityType": "columns"
+		},
+		{
+			"type": "text",
+			"notNull": true,
+			"autoincrement": false,
+			"default": "'[]'",
+			"generated": null,
+			"name": "files",
+			"table": "git_commits",
+			"entityType": "columns"
+		},
+		{
+			"type": "integer",
+			"notNull": true,
+			"autoincrement": false,
+			"default": null,
+			"generated": null,
+			"name": "createdAt",
+			"table": "git_commits",
+			"entityType": "columns"
+		},
+		{
+			"columns": [
+				{
+					"value": "sessionId",
+					"isExpression": false
+				}
+			],
+			"isUnique": false,
+			"where": null,
+			"origin": "manual",
+			"name": "git_commits_sessionId_idx",
+			"table": "git_commits",
+			"entityType": "indexes"
+		},
+		{
+			"columns": [
+				{
+					"value": "hash",
+					"isExpression": false
+				}
+			],
+			"isUnique": false,
+			"where": null,
+			"origin": "manual",
+			"name": "git_commits_hash_idx",
+			"table": "git_commits",
+			"entityType": "indexes"
+		},
+		{
+			"name": "sessions",
+			"entityType": "tables"
+		},
+		{
+			"type": "text",
+			"notNull": false,
+			"autoincrement": false,
+			"default": null,
+			"generated": null,
+			"name": "id",
+			"table": "sessions",
+			"entityType": "columns"
+		},
+		{
+			"columns": ["id"],
+			"nameExplicit": false,
+			"name": "sessions_pk",
+			"table": "sessions",
+			"entityType": "pks"
+		},
+		{
+			"type": "text",
+			"notNull": true,
+			"autoincrement": false,
+			"default": "'local'",
+			"generated": null,
+			"name": "userId",
+			"table": "sessions",
+			"entityType": "columns"
+		},
+		{
+			"type": "integer",
+			"notNull": true,
+			"autoincrement": false,
+			"default": null,
+			"generated": null,
+			"name": "createdAt",
+			"table": "sessions",
+			"entityType": "columns"
+		},
+		{
+			"type": "text",
+			"notNull": true,
+			"autoincrement": false,
+			"default": null,
+			"generated": null,
+			"name": "title",
+			"table": "sessions",
+			"entityType": "columns"
+		},
+		{
+			"type": "integer",
+			"notNull": true,
+			"autoincrement": false,
+			"default": null,
+			"generated": null,
+			"name": "updatedAt",
+			"table": "sessions",
+			"entityType": "columns"
+		},
+		{
+			"type": "text",
+			"notNull": true,
+			"autoincrement": false,
+			"default": "'[]'",
+			"generated": null,
+			"name": "messages",
+			"table": "sessions",
+			"entityType": "columns"
+		},
+		{
+			"columns": [
+				{
+					"value": "userId",
+					"isExpression": false
+				}
+			],
+			"isUnique": false,
+			"where": null,
+			"origin": "manual",
+			"name": "sessions_userId_idx",
+			"table": "sessions",
+			"entityType": "indexes"
+		},
+		{
+			"columns": [
+				{
+					"value": "createdAt",
+					"isExpression": false
+				}
+			],
+			"isUnique": false,
+			"where": null,
+			"origin": "manual",
+			"name": "sessions_createdAt_idx",
+			"table": "sessions",
+			"entityType": "indexes"
+		},
+		{
+			"name": "tool_cache",
+			"entityType": "tables"
+		},
+		{
+			"type": "text",
+			"notNull": false,
+			"autoincrement": false,
+			"default": null,
+			"generated": null,
+			"name": "id",
+			"table": "tool_cache",
+			"entityType": "columns"
+		},
+		{
+			"columns": ["id"],
+			"nameExplicit": false,
+			"name": "tool_cache_pk",
+			"table": "tool_cache",
+			"entityType": "pks"
+		},
+		{
+			"type": "text",
+			"notNull": true,
+			"autoincrement": false,
+			"default": null,
+			"generated": null,
+			"name": "key",
+			"table": "tool_cache",
+			"entityType": "columns"
+		},
+		{
+			"type": "text",
+			"notNull": true,
+			"autoincrement": false,
+			"default": null,
+			"generated": null,
+			"name": "toolName",
+			"table": "tool_cache",
+			"entityType": "columns"
+		},
+		{
+			"type": "text",
+			"notNull": true,
+			"autoincrement": false,
+			"default": null,
+			"generated": null,
+			"name": "result",
+			"table": "tool_cache",
+			"entityType": "columns"
+		},
+		{
+			"type": "integer",
+			"notNull": true,
+			"autoincrement": false,
+			"default": null,
+			"generated": null,
+			"name": "createdAt",
+			"table": "tool_cache",
+			"entityType": "columns"
+		},
+		{
+			"type": "integer",
+			"notNull": true,
+			"autoincrement": false,
+			"default": null,
+			"generated": null,
+			"name": "expiresAt",
+			"table": "tool_cache",
+			"entityType": "columns"
+		},
+		{
+			"columns": [
+				{
+					"value": "key",
+					"isExpression": false
+				}
+			],
+			"isUnique": true,
+			"where": null,
+			"origin": "manual",
+			"name": "tool_cache_key_unique",
+			"table": "tool_cache",
+			"entityType": "indexes"
+		},
+		{
+			"columns": [
+				{
+					"value": "key",
+					"isExpression": false
+				}
+			],
+			"isUnique": false,
+			"where": null,
+			"origin": "manual",
+			"name": "tool_cache_key_idx",
+			"table": "tool_cache",
+			"entityType": "indexes"
+		},
+		{
+			"columns": [
+				{
+					"value": "toolName",
+					"isExpression": false
+				}
+			],
+			"isUnique": false,
+			"where": null,
+			"origin": "manual",
+			"name": "tool_cache_toolName_idx",
+			"table": "tool_cache",
+			"entityType": "indexes"
+		},
+		{
+			"columns": [
+				{
+					"value": "expiresAt",
+					"isExpression": false
+				}
+			],
+			"isUnique": false,
+			"where": null,
+			"origin": "manual",
+			"name": "tool_cache_expiresAt_idx",
+			"table": "tool_cache",
+			"entityType": "indexes"
+		}
+	],
+	"renames": []
+}

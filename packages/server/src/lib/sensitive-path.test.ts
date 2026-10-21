@@ -11,4 +11,18 @@ describe("sensitive path policy", () => {
 		expect(isSensitivePath(".env.example")).toBe(false);
 		expect(isSensitivePath("docs/environment.md")).toBe(false);
 	});
+
+	it("keeps credential directories sensitive even when a file looks like a template", () => {
+		for (const path of [
+			".ssh/.env.example",
+			".aws/nested.env.sample",
+			"C:\\Users\\user\\.kube\\env.template",
+			"C:\\repo\\.ssh \\notes.txt",
+			"C:\\repo\\.env ",
+			"C:\\repo\\.env::$DATA",
+		]) {
+			expect(isSensitivePath(path)).toBe(true);
+		}
+		expect(isSensitivePath("config/.env.template")).toBe(false);
+	});
 });

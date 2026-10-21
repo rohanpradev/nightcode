@@ -5,12 +5,13 @@
 	"type": "module",
 	"private": true,
 	"engines": {
-		"bun": ">=1.3.14"
+		"bun": ">=1.4.3"
 	},
-	"packageManager": "bun@1.3.14",
+	"packageManager": "bun@1.4.3",
 	"devDependencies": {
-		"@biomejs/biome": "^2.5.3",
-		"typescript": "^7.0.2"
+		"@biomejs/biome": "^2.5.15",
+		"@types/bun": "1.4.3",
+		"typescript": "7.0.2"
 	},
 	"scripts": {
 		"dev": "bun run --parallel --if-present --filter '@nightcode/*' dev",
@@ -26,24 +27,30 @@
 		"test:coverage": "bun test --coverage --coverage-reporter=text --coverage-reporter=lcov && bun run scripts/check-coverage.ts",
 		"test:stress": "bun test --randomize --rerun-each=3",
 		"test:server": "bun test packages/server/src",
+		"test:server:live": "bun run scripts/test-server-live.ts",
+		"test:gateway:live": "bun run scripts/test-gateway-live.ts",
+		"test:cli:smoke": "bun run packages/cli/src/index.tsx --ui-smoke --ui-smoke-ms=300",
+		"test:cli:bundle": "bun --no-env-file packages/cli/dist/index.js --ui-smoke --ui-smoke-ms=300",
 		"eval:harness": "bun test packages/server/src/lib packages/server/src/services",
 		"db:generate": "bun run --cwd packages/database db:generate",
+		"db:up": "bun run --cwd packages/database db:up",
+		"db:check": "bun run --cwd packages/database db:check",
 		"db:push": "bun run --cwd packages/database db:push",
 		"db:studio": "bun run --cwd packages/database db:studio",
 		"db:migrate": "bun run --cwd packages/database db:migrate",
-		"check": "bun run --parallel format:check lint typecheck",
+		"check": "bun run --parallel format:check lint typecheck typecheck:scripts",
 		"check:fix": "bunx --no-install --bun @biomejs/biome check --write .",
 		"format": "bunx --no-install --bun @biomejs/biome format --write .",
 		"format:check": "bunx --no-install --bun @biomejs/biome format .",
 		"lint": "bunx --no-install --bun @biomejs/biome lint .",
 		"typecheck": "bun run --parallel --filter '@nightcode/*' typecheck",
-		"verify": "bun run check && bun run test:coverage && bun run build",
-		"deps:check": "bun outdated",
+		"typecheck:scripts": "bun --check --tsconfig-override scripts/tsconfig.json",
+		"verify": "bun run check && bun run db:check && bun run test:coverage && bun run build",
+		"deps:check": "bun outdated --recursive",
+		"deps:audit": "bun audit",
 		"clean": "bun run scripts/clean.ts"
 	},
 	"workspaces": [
-		"packages/*",
-		"!packages/**/test/**",
-		"!packages/**/template/**"
+		"packages/*"
 	]
 }

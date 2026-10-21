@@ -34,6 +34,23 @@ Repository indexes are keyed by normalized workspace root. Indexing records actu
 
 Local compact mode does not pretend that substring truncation is a faithful summary. It emits an honest user-level context note, preserves recent messages, and instructs the agent to re-read state when missing history matters. Anthropic runs additionally enable native context editing and compaction.
 
+Within a run, `prepareStep` budgets model history with headroom for instructions, tool schemas,
+and output. It can remove complete old assistant/tool exchanges without splitting tool or
+approval dependencies. User messages, unresolved operations, and recent exchanges are retained.
+Irreducible input returns `CONTEXT_BUDGET_EXCEEDED`. Repository-map allowance is a separate budget;
+its header and separators count toward the estimate. Context pins are authorized when read and
+cannot grant access to additional roots.
+
+Sonnet 5.5, Opus 5.5, Haiku 5.5, and Fable 5.1 sign reasoning against preceding conversation state. Their instructions
+are frozen for a tool/approval chain, and local history edits stop after the first provider call.
+Approval continuation retains the frozen instructions and validates tool definitions before
+resuming. Other models may compact complete old exchanges between steps.
+
+Four identical consecutive steps consisting only of completed inspections or failed tool calls
+stop with `no-progress`. A tool loop exhausting its step allowance returns `step-limit`.
+Successful shell, mutation, and external tool acknowledgements are excluded from stagnation
+detection. These terminal reasons remain incomplete outcomes for evaluation.
+
 ## Transport and durability
 
 The CLI defaults to an embedded runtime for zero-setup local use. The typed Hono client supports the same event contract over HTTP, including approval continuation and abort signals.

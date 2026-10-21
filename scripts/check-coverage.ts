@@ -43,7 +43,7 @@ export function parseLcovTotals(lcov: string): CoverageTotals {
 }
 
 function ratio(hit: number, found: number): number {
-	return found === 0 ? 1 : hit / found;
+	return found === 0 ? 0 : hit / found;
 }
 
 function percentage(value: number): string {
@@ -54,6 +54,13 @@ export function evaluateCoverage(
 	totals: CoverageTotals,
 	log: (message: string) => void = console.log,
 ): string[] {
+	if (
+		Object.values(totals).some((value) => !Number.isSafeInteger(value) || value < 0) ||
+		totals.linesHit > totals.linesFound ||
+		totals.functionsHit > totals.functionsFound
+	) {
+		throw new Error("Invalid LCOV coverage totals");
+	}
 	const results = [
 		{
 			label: "lines",

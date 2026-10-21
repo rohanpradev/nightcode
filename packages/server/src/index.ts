@@ -1,25 +1,26 @@
 import { timingSafeEqual } from "node:crypto";
 import { realpath, stat } from "node:fs/promises";
-import { delimiter, isAbsolute, relative, resolve } from "node:path";
+import { delimiter, isAbsolute, relative, resolve, sep } from "node:path";
 import { zValidator } from "@hono/zod-validator";
-import {
-	agentRunResultSchema,
-	approvalRequestSchema,
-	chatRequestSchema,
-	type LLMStreamChunk,
-} from "@nightcode/shared";
+import { agentRunResultSchema, approvalRequestSchema, chatRequestSchema } from "@nightcode/shared";
 import { serve } from "bun";
 import { Hono } from "hono";
+import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
 import { optionalEnv } from "./lib/env";
+import { ndjsonResponse } from "./lib/event-stream";
 import { CodingAgentService } from "./services/agents";
 import { llm } from "./services/llm";
 import { logger } from "./services/logger";
 import { modelRouter } from "./services/model-router";
 import { RuntimeSessionError, runtimeManager } from "./services/runtime-manager";
 
+const MAX_REQUEST_BYTES = 8 * 1024 * 1024;
+
 const app = new Hono()
 	.use("*", async (c, next) => {
+		c.header("Referrer-Policy", "no-referrer");
+		c.header("X-Content-Type-Options", "nosniff");
 		const expectedToken = optionalEnv("NIGHTCODE_API_TOKEN");
 		if (expectedToken && !hasValidBearerToken(c.req.header("Authorization"), expectedToken)) {
 			return c.json(
@@ -28,11 +29,37 @@ const app = new Hono()
 				{ "WWW-Authenticate": 'Bearer realm="nightcode"' },
 			);
 		}
+		const requestUrl = new URL(c.req.url);
+		// Without authentication, only explicit loopback authorities may reach the
+		// service. Comparing Origin to an unchecked Host alone permits DNS rebinding.
+		if (!expectedToken && !isLoopbackHost(requestUrl.hostname)) {
+			return c.json(
+				{ error: "A loopback request host is required", code: "HOST_NOT_ALLOWED" },
+				403,
+			);
+		}
+		const origin = c.req.header("Origin");
+		const fetchSite = c.req.header("Sec-Fetch-Site");
+		if (
+			(origin !== undefined && origin !== requestUrl.origin) ||
+			(fetchSite !== undefined && fetchSite !== "same-origin" && fetchSite !== "none")
+		) {
+			return c.json(
+				{ error: "Cross-origin requests are not allowed", code: "ORIGIN_NOT_ALLOWED" },
+				403,
+			);
+		}
 		await next();
-		c.header("Referrer-Policy", "no-referrer");
-		c.header("X-Content-Type-Options", "nosniff");
 		return;
 	})
+	.use(
+		"*",
+		bodyLimit({
+			maxSize: MAX_REQUEST_BYTES,
+			onError: (c) =>
+				c.json({ error: "Request body exceeds 8 MiB", code: "PAYLOAD_TOO_LARGE" }, 413),
+		}),
+	)
 	.get("/health", (c) =>
 		c.json({
 			ok: true,
@@ -50,7 +77,7 @@ const app = new Hono()
 				provider: z.enum(["openai", "anthropic", "azure"]).optional(),
 			}),
 		),
-		(c) => c.json(modelRouter.listModels(c.req.valid("query").provider)),
+		async (c) => c.json(await modelRouter.listModels(c.req.valid("query").provider)),
 	)
 	.post("/chat", zValidator("json", chatRequestSchema), async (c) => {
 		const body = c.req.valid("json");
@@ -121,59 +148,12 @@ const app = new Hono()
 				sessionId,
 				abortSignal: c.req.raw.signal,
 			});
+			c.header("X-Nightcode-Session-Id", sessionId);
 			return c.json(agentRunResultSchema.parse(result));
 		} catch (error) {
 			return runtimeErrorResponse(c, error);
 		}
 	});
-
-function ndjsonResponse(
-	createStream: (signal: AbortSignal) => AsyncGenerator<LLMStreamChunk>,
-	requestSignal: AbortSignal,
-	headers: Record<string, string> = {},
-): Response {
-	const abortController = new AbortController();
-	const onRequestAbort = () => abortController.abort(requestSignal.reason ?? "request aborted");
-	if (requestSignal.aborted) onRequestAbort();
-	else requestSignal.addEventListener("abort", onRequestAbort, { once: true });
-	const encoder = new TextEncoder();
-	let cancelled = false;
-	const stream = new ReadableStream<Uint8Array>({
-		async start(controller) {
-			try {
-				for await (const chunk of createStream(abortController.signal)) {
-					if (cancelled) break;
-					controller.enqueue(encoder.encode(`${JSON.stringify(chunk)}\n`));
-				}
-			} catch (error) {
-				if (!cancelled) {
-					const message = error instanceof Error ? error.message : String(error);
-					controller.enqueue(
-						encoder.encode(
-							`${JSON.stringify({ type: "error", error: message, code: "STREAM_FAILED" })}\n`,
-						),
-					);
-				}
-			} finally {
-				requestSignal.removeEventListener("abort", onRequestAbort);
-				if (!cancelled) controller.close();
-			}
-		},
-		cancel(reason) {
-			cancelled = true;
-			abortController.abort(reason ?? "response consumer cancelled");
-		},
-	});
-
-	return new Response(stream, {
-		headers: {
-			"Content-Type": "application/x-ndjson; charset=utf-8",
-			"Cache-Control": "no-cache, no-transform",
-			"X-Content-Type-Options": "nosniff",
-			...headers,
-		},
-	});
-}
 
 async function getOrCreateRequestRuntime(sessionId: string, requestedWorkspace?: string) {
 	const existing = runtimeManager.get(sessionId);
@@ -203,7 +183,7 @@ async function authorizeServerWorkspace(requested?: string): Promise<string> {
 function containsPath(root: string, candidate: string): boolean {
 	const normalize = (path: string) => (process.platform === "win32" ? path.toLowerCase() : path);
 	const path = relative(normalize(root), normalize(candidate));
-	return path === "" || (!path.startsWith("..") && !isAbsolute(path));
+	return path === "" || (path !== ".." && !path.startsWith(`..${sep}`) && !isAbsolute(path));
 }
 
 function hasValidBearerToken(header: string | undefined, expectedToken: string): boolean {
@@ -239,7 +219,7 @@ if (import.meta.main) {
 	const server = serve({
 		hostname,
 		port,
-		maxRequestBodySize: 8 * 1024 * 1024,
+		maxRequestBodySize: MAX_REQUEST_BYTES,
 		fetch(request, bunServer) {
 			const pathname = new URL(request.url).pathname;
 			if (
@@ -257,11 +237,13 @@ if (import.meta.main) {
 	};
 	process.once("SIGINT", shutdown);
 	process.once("SIGTERM", shutdown);
-	logger.info(`server listening on http://${hostname}:${port}`);
+	logger.info(`server listening on ${server.url.origin}`);
 }
 
 function isLoopbackHost(hostname: string): boolean {
 	return ["localhost", "127.0.0.1", "::1", "[::1]"].includes(hostname.toLowerCase());
 }
 
-export default app;
+// A default export with a fetch method makes Bun start another HTTP server.
+// Keep startup under import.meta.main so imports never bind a port.
+export { app };

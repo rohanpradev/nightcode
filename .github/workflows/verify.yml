@@ -1,0 +1,48 @@
+name: Verify
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: "1.4.3"
+      - name: Install locked dependencies
+        run: bun ci
+      - name: Audit locked dependencies
+        run: bun run deps:audit
+      - name: Verify source, migrations, coverage, and builds
+        run: bun run verify
+      - name: Repeat tests in randomized order
+        run: bun run test:stress
+      - name: Smoke test the native terminal UI
+        run: bun run test:cli:smoke
+      - name: Smoke test the bundled terminal UI
+        run: bun run test:cli:bundle
+      - name: Save coverage
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: coverage-${{ matrix.os }}
+          path: coverage/lcov.info
+          retention-days: 14
+          if-no-files-found: ignore

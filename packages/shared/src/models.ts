@@ -16,16 +16,65 @@ export interface SupportedChatModel {
 
 export const supportedChatModels = [
 	{
+		id: "gpt-6-astra",
+		provider: "openai",
+		label: "GPT-6 Astra",
+		contextWindow: 1_050_000,
+		maxOutputTokens: 128_000,
+		defaultForProvider: true,
+		pricing: {
+			inputUsdPerMillionTokens: 10,
+			cachedInputUsdPerMillionTokens: 1,
+			outputUsdPerMillionTokens: 50,
+		},
+	},
+	{
+		id: "gpt-6.1-sol",
+		provider: "openai",
+		label: "GPT-6.1 Sol",
+		contextWindow: 1_050_000,
+		maxOutputTokens: 128_000,
+		pricing: {
+			inputUsdPerMillionTokens: 2,
+			cachedInputUsdPerMillionTokens: 0.1,
+			outputUsdPerMillionTokens: 10,
+		},
+	},
+	{
+		id: "gpt-6-luna",
+		provider: "openai",
+		label: "GPT-6 Luna",
+		contextWindow: 1_050_000,
+		maxOutputTokens: 128_000,
+		pricing: {
+			inputUsdPerMillionTokens: 0.1,
+			cachedInputUsdPerMillionTokens: 0.01,
+			outputUsdPerMillionTokens: 0.5,
+		},
+	},
+	{
+		id: "gpt-6-sol",
+		provider: "openai",
+		label: "GPT-6 Sol",
+		contextWindow: 1_050_000,
+		maxOutputTokens: 128_000,
+		pricing: {
+			inputUsdPerMillionTokens: 2,
+			cachedInputUsdPerMillionTokens: 0.2,
+			outputUsdPerMillionTokens: 10,
+		},
+	},
+	{
 		id: "gpt-5.6",
 		provider: "openai",
 		label: "GPT-5.6 Sol",
 		contextWindow: 1_050_000,
 		maxOutputTokens: 128_000,
-		defaultForProvider: true,
+		defaultForProvider: false,
 		pricing: {
-			inputUsdPerMillionTokens: 5,
-			cachedInputUsdPerMillionTokens: 0.5,
-			outputUsdPerMillionTokens: 30,
+			inputUsdPerMillionTokens: 4,
+			cachedInputUsdPerMillionTokens: 0.4,
+			outputUsdPerMillionTokens: 20,
 		},
 	},
 	{
@@ -35,9 +84,9 @@ export const supportedChatModels = [
 		contextWindow: 1_050_000,
 		maxOutputTokens: 128_000,
 		pricing: {
-			inputUsdPerMillionTokens: 5,
-			cachedInputUsdPerMillionTokens: 0.5,
-			outputUsdPerMillionTokens: 30,
+			inputUsdPerMillionTokens: 4,
+			cachedInputUsdPerMillionTokens: 0.4,
+			outputUsdPerMillionTokens: 20,
 		},
 	},
 	{
@@ -47,9 +96,9 @@ export const supportedChatModels = [
 		contextWindow: 1_050_000,
 		maxOutputTokens: 128_000,
 		pricing: {
-			inputUsdPerMillionTokens: 2.5,
-			cachedInputUsdPerMillionTokens: 0.25,
-			outputUsdPerMillionTokens: 15,
+			inputUsdPerMillionTokens: 2,
+			cachedInputUsdPerMillionTokens: 0.2,
+			outputUsdPerMillionTokens: 12,
 		},
 	},
 	{
@@ -59,9 +108,9 @@ export const supportedChatModels = [
 		contextWindow: 1_050_000,
 		maxOutputTokens: 128_000,
 		pricing: {
-			inputUsdPerMillionTokens: 1,
-			cachedInputUsdPerMillionTokens: 0.1,
-			outputUsdPerMillionTokens: 6,
+			inputUsdPerMillionTokens: 0.2,
+			cachedInputUsdPerMillionTokens: 0.02,
+			outputUsdPerMillionTokens: 1.2,
 		},
 	},
 	{
@@ -182,48 +231,83 @@ export const supportedChatModels = [
 		},
 	},
 	{
+		id: "claude-opus-5-5",
+		provider: "anthropic",
+		label: "Claude Opus 5.5",
+		contextWindow: 1_000_000,
+		maxOutputTokens: 128_000,
+		pricing: {
+			inputUsdPerMillionTokens: 4,
+			cachedInputUsdPerMillionTokens: 0.2,
+			outputUsdPerMillionTokens: 20,
+		},
+	},
+	{
+		id: "claude-sonnet-5-5",
+		provider: "anthropic",
+		label: "Claude Sonnet 5.5",
+		contextWindow: 1_000_000,
+		maxOutputTokens: 128_000,
+		defaultForProvider: true,
+		pricing: {
+			inputUsdPerMillionTokens: 2,
+			cachedInputUsdPerMillionTokens: 0.1,
+			outputUsdPerMillionTokens: 10,
+		},
+	},
+	{
 		id: "claude-opus-4-7",
 		provider: "anthropic",
 		label: "Claude Opus 4.7",
-		contextWindow: 200_000,
-		maxOutputTokens: 32_000,
+		contextWindow: 1_000_000,
+		maxOutputTokens: 128_000,
 	},
 	{
 		id: "claude-opus-4-6",
 		provider: "anthropic",
 		label: "Claude Opus 4.6",
-		contextWindow: 200_000,
-		maxOutputTokens: 32_000,
+		contextWindow: 1_000_000,
+		maxOutputTokens: 128_000,
 	},
 	{
 		id: "claude-sonnet-4-6",
 		provider: "anthropic",
 		label: "Claude Sonnet 4.6",
-		contextWindow: 200_000,
-		maxOutputTokens: 32_000,
-		defaultForProvider: true,
+		contextWindow: 1_000_000,
+		maxOutputTokens: 128_000,
 	},
 	{
 		id: "claude-sonnet-4-5",
 		provider: "anthropic",
 		label: "Claude Sonnet 4.5",
-		contextWindow: 200_000,
-		maxOutputTokens: 32_000,
+		contextWindow: 1_000_000,
+		maxOutputTokens: 64_000,
 	},
 	{
 		id: "claude-haiku-4-5",
 		provider: "anthropic",
 		label: "Claude Haiku 4.5",
 		contextWindow: 200_000,
-		maxOutputTokens: 32_000,
+		maxOutputTokens: 64_000,
 	},
 ] satisfies SupportedChatModel[];
 
 export function findSupportedChatModel(modelId: string): SupportedChatModel | undefined {
-	return supportedChatModels.find((model) => model.id === modelId);
+	const slash = modelId.indexOf("/");
+	const namespace = slash < 0 ? undefined : modelId.slice(0, slash);
+	const shortId = slash < 0 ? modelId : modelId.slice(slash + 1);
+	const normalized = shortId.replace(/^(claude-(?:opus|sonnet|haiku)-\d+)\.(\d+)/, "$1-$2");
+	return supportedChatModels.find(
+		(model) => model.id === normalized && (!namespace || model.provider === namespace),
+	);
 }
 
 export function getProviderForModel(modelId: string): SupportedProvider | undefined {
+	if (modelId.includes("/")) {
+		const namespace = modelId.split("/", 1)[0];
+		if (namespace === "openai" || namespace === "anthropic") return namespace;
+		return undefined;
+	}
 	return findSupportedChatModel(modelId)?.provider;
 }
 

@@ -48,9 +48,20 @@ the first write and rolls back the batch on an ordinary write failure. Undo veri
 still matches Night Code's post-patch content before restoring anything, preventing accidental
 overwrite of later user edits.
 
-Mutations from all sessions whose primary canonical workspace is the same are serialized FIFO and
-can be cancelled while waiting. The lock key is the primary workspace, not every additional root:
-two different workspaces explicitly granted the same external root can still race there.
+All four editing tools share bounded, reversible UTF-8 text snapshots. Files are limited to 8 MiB;
+combined before/after snapshots in one patch are limited to 32 MiB. Invalid UTF-8, NUL-containing
+files, and malformed Unicode output are rejected before any writes. UTF-8 BOMs and line endings
+are preserved. Literal replacements reject overlapping matches and do not interpret dollar tokens.
+Undo reauthorizes paths and rejects redirected junctions/symlinks before checking content. It uses
+the same transactional patch path, including rollback on ordinary restore failures. Rollback attempts
+every affected file and reports paths that could not be restored instead of silently suppressing errors.
+
+Mutations reserve the primary workspace and all explicitly allowed roots together. Reservations
+with equal or overlapping canonical paths are serialized FIFO and can be cancelled while waiting.
+This covers nested workspaces, shared external roots, and roots added with `/allow`. Directory
+aliases resolve through their nearest existing ancestor, including for paths not yet created.
+Disjoint roots remain concurrent. Reservations are process-local and deliberately conservative:
+granting a broad root reduces concurrency even when a particular operation touches only one file.
 
 ## Sensitive files and search
 
@@ -72,7 +83,15 @@ The shell tool provides:
 - a canonical, authorized working directory;
 - time limits, bounded stdout/stderr, cancellation, and exit codes;
 - a minimal environment with provider credentials and secret-like variables removed;
-- isolated `HOME`, `USERPROFILE`, `TMP`, and `TEMP` directories under `.nightcode`.
+- isolated `HOME`, `USERPROFILE`, `TMP`, and `TEMP` directories under a private OS temporary root.
+
+Multiline commands and control-character separators never qualify for automatic read-only approval.
+Only a small allowlist of `git status` and branch-listing arguments can run unattended; commands
+that print file contents or use mutation-capable flags require approval. Allowed Git inspection runs
+directly, bypassing the shell, with paging and repository-configured
+[`core.fsmonitor`](https://git-scm.com/docs/git-config#Documentation/git-config.txt-corefsmonitor)
+hooks disabled. Use a current Git release; Git versions before 2.36 do not consistently interpret
+the boolean fsmonitor setting.
 
 The local shell runner is **not an operating-system sandbox**. An approved general-purpose command
 still has the host user's process, filesystem, and network permissions. Timeouts and cancellation
@@ -92,20 +111,38 @@ does not connect MCP servers.
 
 Tools are namespaced, can be allowlisted, inherit a minimal redacted environment for stdio, and
 default to approval. Connect, discovery, and close operations are time-bounded. Remote transport
-requires HTTPS except for loopback HTTP, rejects redirects and embedded URL credentials, and blocks
-literal private/link-local/metadata targets and several well-known metadata addresses.
+requires HTTPS except for explicitly configured loopback servers, rejects redirects and embedded URL
+credentials, and blocks private, link-local, metadata, multicast, documentation, and other reserved
+address ranges, including IPv4-mapped private IPv6 addresses and NAT64/6to4 transition ranges.
 
-These checks do not resolve and pin DNS before connection, so DNS rebinding remains possible. A
-trusted or compromised MCP server can also change advertised behavior, return prompt-injection
-content, access anything available to its own process, or exfiltrate tool inputs. Apply outbound
-network controls and follow the
-[MCP security best practices](https://modelcontextprotocol.io/docs/tutorials/security/security_best_practices).
+Each HTTP request validates its origin, resolves every DNS answer, rejects the complete answer set
+if any address violates policy, and connects directly to the first checked address. `localhost`
+must resolve exclusively to loopback addresses. The original `Host` header, TLS server name, and
+certificate verification are preserved using
+[Bun's native fetch address pinning](https://bun.com/docs/runtime/networking/fetch#connecting-to-a-specific-address).
+Automatic proxy environment settings are disabled for these connections so a proxy cannot resolve
+the hostname independently. Redirects are rejected before another request is sent. Cancellation
+applies during DNS resolution, connection, and streaming; native fetch handles compression and empty
+responses. DNS lookup may finish in the background after cancellation but cannot start a request.
+
+A trusted or compromised MCP server can still change advertised behavior, return prompt-injection
+content, access anything available to its own process, or exfiltrate tool inputs. Network routes,
+custom DNS infrastructure, and local administrators remain outside this transport's control. Apply
+outbound network controls and follow the current
+[MCP security best practices](https://modelcontextprotocol.io/specification/latest/basic/security_best_practices).
 
 ## HTTP boundary
 
 The server binds to `127.0.0.1` by default. `NIGHTCODE_API_TOKEN`, when configured, protects every
 route with constant-time bearer-token comparison; a token is required before binding to a
 non-loopback host. Bearer authentication is not TLS.
+
+Without a configured token, request authorities must use `localhost`, `127.0.0.1`, or `::1`;
+arbitrary hostnames are rejected even if DNS resolves them to loopback. When supplied, `Origin`
+must exactly match the request URL's origin, and `Sec-Fetch-Site` must be `same-origin` or `none`.
+These checks cover every route, including JSON and read-only routes. Native CLI clients need
+neither browser header. Remote clients require the configured bearer token. Reverse proxies must
+preserve the external request origin correctly; forwarded headers are not trusted automatically.
 
 Clients cannot select arbitrary host directories. `NIGHTCODE_SERVER_WORKSPACE_ROOTS` defines allowed
 canonical roots, and a session cannot later be rebound to another workspace. Session IDs and request
@@ -116,6 +153,9 @@ cannot be deleted or evicted.
 ## Durability boundary
 
 Conversation messages and presentation notices are persisted in the local SQLite session database.
+Saving a session and enforcing retention are one database transaction; snapshots with older timestamps
+cannot replace newer history. A malformed or unreadable legacy session file surfaces an import error
+without marking migration complete, allowing a retry after repair.
 In-flight model/tool state, pending approvals, the resolved-approval cache, mutation queues, and undo
 checkpoints are process memory only. A process restart cannot rehydrate a paused approval or undo the
 previous process's checkpoint.

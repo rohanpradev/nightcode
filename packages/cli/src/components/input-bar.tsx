@@ -36,15 +36,16 @@ export function InputBar({ onSubmit, commandContext, disabled, vimMode = false }
 	} = useCommandMenu();
 
 	useEffect(() => {
-		if (!textareaRef.current) return;
+		const editor = textareaRef.current;
+		if (!editor) return;
 
-		textareaRef.current.traits = {
+		editor.traits = {
 			capture: ["escape", "submit", "tab"],
 			status: showCommandMenu ? "Command palette" : "Composing",
 		} satisfies EditorTraits;
 
 		return () => {
-			if (textareaRef.current) textareaRef.current.traits = {};
+			editor.traits = {};
 		};
 	}, [showCommandMenu]);
 

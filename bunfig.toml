@@ -1,3 +1,5 @@
+env = false
+
 [test]
 coverageDir = "./coverage"
 coverageSkipTestFiles = true

@@ -20,16 +20,19 @@ export const llmMessageSchema = z.object({
 
 export const approvalModeSchema = z.enum(["always", "on-risk", "never"]);
 
-export const reasoningEffortSchema = z.enum(["none", "low", "medium", "high", "xhigh"]);
+export const reasoningEffortSchema = z.enum(["none", "low", "medium", "high", "xhigh", "max"]);
+
+export const textVerbositySchema = z.enum(["low", "medium", "high"]);
 
 export const llmConfigSchema = z.object({
 	provider: supportedProviderSchema.default("openai"),
-	model: z.string().min(1).max(200).default("gpt-5.6"),
+	model: z.string().min(1).max(200).default("gpt-6-astra"),
 	maxTokens: z.number().int().positive().max(128_000).default(8192),
 	temperature: z.number().min(0).max(2).default(0.2),
 	systemPrompt: z.string().max(256_000).optional(),
 	agentMode: z.boolean().default(true),
 	reasoningEffort: reasoningEffortSchema.optional(),
+	textVerbosity: textVerbositySchema.optional(),
 	approvalMode: approvalModeSchema.default("on-risk"),
 });
 
@@ -156,13 +159,21 @@ export const approvalRequestSchema = z.object({
 });
 
 export const agentRunResultSchema = z.object({
+	status: z.enum(["completed", "approval-required", "aborted", "failed"]),
 	text: z.string(),
 	toolCalls: z.number().int().nonnegative(),
+	steps: z.number().int().nonnegative(),
+	approvalsRequired: z.number().int().nonnegative(),
 	durationMs: z.number().int().nonnegative(),
+	finishReason: z.string().optional(),
+	error: z.string().optional(),
 	usage: z
 		.object({
 			inputTokens: z.number().int().nonnegative(),
 			outputTokens: z.number().int().nonnegative(),
+			totalTokens: z.number().int().nonnegative(),
+			reasoningTokens: z.number().int().nonnegative(),
+			cachedInputTokens: z.number().int().nonnegative(),
 		})
 		.optional(),
 });
@@ -178,3 +189,4 @@ export type ApprovalDecision = z.infer<typeof approvalDecisionSchema>;
 export type ApprovalRequest = z.infer<typeof approvalRequestSchema>;
 export type ApprovalMode = z.infer<typeof approvalModeSchema>;
 export type ReasoningEffort = z.infer<typeof reasoningEffortSchema>;
+export type TextVerbosity = z.infer<typeof textVerbositySchema>;

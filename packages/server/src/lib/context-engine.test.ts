@@ -1,8 +1,10 @@
 import { describe, expect, it } from "bun:test";
-import { mkdir, mkdtemp, symlink, unlink, utimes, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rename, symlink, unlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { estimateTokens } from "./cache";
 import {
+	assembleContext,
 	compactMessages,
 	generateRepomap,
 	getSymbolCount,
@@ -148,5 +150,92 @@ describe("repository context", () => {
 		expect(compacted[0]?.role).toBe("user");
 		expect(compacted[0]?.content).not.toContain("SECRET-OLD-INSTRUCTION");
 		expect(compacted.at(-1)?.content).toBe("recent");
+	});
+
+	it("bounds pinned context, resolves relative pins from the workspace, and deduplicates aliases", async () => {
+		const root = await mkdtemp(join(tmpdir(), "nightcode-context-pins-"));
+		const path = join(root, "feature.ts");
+		await writeFile(path, "export const feature = true;");
+		await indexDirectory(root);
+		const config = {
+			cwd: root,
+			maxTokens: 200,
+			minRelevance: 0,
+			pinnedFiles: ["feature.ts", path],
+		};
+		const context = await assembleContext("feature", config);
+		expect(context).toHaveLength(1);
+		expect(context[0]?.reason).toBe("pinned");
+		expect(context[0]?.content).toBe("export const feature = true;");
+		expect(context[0]?.tokens).toBe(estimateTokens(context[0]?.content ?? ""));
+
+		await writeFile(path, "x".repeat(100_000));
+		const bounded = await assembleContext("feature", { ...config, maxTokens: 100 });
+		expect(bounded[0]?.content).toContain("[truncated;");
+		expect(bounded.reduce((total, file) => total + file.tokens, 0)).toBeLessThanOrEqual(100);
+	});
+
+	it("never lets context pins grant access to external or sensitive files", async () => {
+		const root = await mkdtemp(join(tmpdir(), "nightcode-context-boundary-"));
+		const outside = await mkdtemp(join(tmpdir(), "nightcode-context-external-"));
+		const outsideFile = join(outside, "private.ts");
+		await writeFile(outsideFile, "EXTERNAL_SECRET");
+		await writeFile(join(root, ".env"), "API_KEY=SECRET");
+		await writeFile(join(root, "visible.ts"), "export const visible = true;");
+		const context = await assembleContext("", {
+			cwd: root,
+			maxTokens: 1000,
+			minRelevance: 0,
+			pinnedFiles: [outsideFile, ".env", "visible.ts"],
+		});
+		expect(context).toHaveLength(1);
+		expect(context[0]?.content).toContain("visible");
+	});
+
+	it("revalidates an indexed path after its directory is replaced by an external link", async () => {
+		const root = await mkdtemp(join(tmpdir(), "nightcode-context-stale-"));
+		const outside = await mkdtemp(join(tmpdir(), "nightcode-context-stale-external-"));
+		const nested = join(root, "source");
+		await mkdir(nested);
+		await writeFile(join(nested, "feature.ts"), "export const feature = true;");
+		await writeFile(join(outside, "feature.ts"), "EXTERNAL_SECRET");
+		await indexDirectory(root);
+		await rename(nested, join(root, "original"));
+		await symlink(outside, nested, process.platform === "win32" ? "junction" : "dir");
+		const context = await assembleContext("feature", {
+			cwd: root,
+			maxTokens: 1000,
+			minRelevance: 0,
+			pinnedFiles: [],
+		});
+		expect(context).toEqual([]);
+	});
+
+	it("includes map headers and separators in its advertised token estimate", async () => {
+		const root = await mkdtemp(join(tmpdir(), "nightcode-context-map-budget-"));
+		await writeFile(join(root, "small.ts"), "export const small = () => true;");
+		await indexDirectory(root);
+		for (const maxTokens of [0, 1, 5, 10, 30, 100]) {
+			expect(estimateTokens(generateRepomap(maxTokens, root))).toBeLessThanOrEqual(maxTokens);
+		}
+		expect(generateRepomap(Number.NaN, root)).toBe("");
+	});
+
+	it("ignores notices before choosing recent context and handles invalid keep counts", () => {
+		const messages = [
+			{ role: "user", content: "user objective" },
+			{ role: "assistant", content: "assistant evidence" },
+			...Array.from({ length: 10 }, () => ({ role: "notice", content: "UI diagnostic" })),
+			{ role: "user", content: "continue" },
+		];
+		const compacted = compactMessages(messages, 3);
+		expect(compacted.map((message) => message.content)).toEqual([
+			"user objective",
+			"assistant evidence",
+			"continue",
+		]);
+		for (const keepLast of [0, -1, Number.NaN]) {
+			expect(compactMessages(messages, keepLast).at(-1)?.content).toBe("continue");
+		}
 	});
 });

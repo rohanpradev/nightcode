@@ -1,6 +1,43 @@
-import { rm } from "node:fs/promises";
+import { rm, stat } from "node:fs/promises";
 import { z } from "zod";
 import { atomicWriteFile, sha256, type WorkspaceBoundary } from "./workspace-boundary";
+
+export const MAX_PATCH_FILE_BYTES = 8 * 1024 * 1024;
+const MAX_PATCH_BATCH_BYTES = 32 * 1024 * 1024;
+
+/** Read a reversible text snapshot without decoding invalid bytes lossily. */
+export async function readPatchText(path: string): Promise<string> {
+	if (!(await stat(path)).isFile()) throw new Error(`Not a regular file: ${path}`);
+	const bytes = await Bun.file(path)
+		.slice(0, MAX_PATCH_FILE_BYTES + 1)
+		.bytes();
+	if (bytes.byteLength > MAX_PATCH_FILE_BYTES) {
+		throw new Error(`Text patch file exceeds 8 MiB: ${path}`);
+	}
+	try {
+		// Preserve a UTF-8 BOM in hashes, replacements, and undo snapshots.
+		const text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+		if (text.includes("\0")) throw new Error("binary data");
+		return text;
+	} catch {
+		throw new Error(`Text patches require UTF-8 text without NUL bytes: ${path}`);
+	}
+}
+
+export function replaceUniqueText(
+	before: string,
+	oldText: string,
+	newText: string,
+	path: string,
+): string {
+	if (!oldText) throw new Error(`oldText must not be empty in ${path}`);
+	const index = before.indexOf(oldText);
+	if (index < 0) throw new Error(`oldText not found in ${path}`);
+	if (before.indexOf(oldText, index + 1) >= 0) {
+		throw new Error(`oldText matched multiple times in ${path}; make it unique`);
+	}
+	return before.slice(0, index) + newText + before.slice(index + oldText.length);
+}
 
 const expectedHashSchema = z
 	.string()
@@ -59,22 +96,24 @@ function applyOperation(operation: PatchOperation, before: string | null): strin
 	if (operation.type === "delete") return null;
 	if (operation.type === "update") return operation.content;
 
-	const occurrences = before.split(operation.oldText).length - 1;
-	if (occurrences === 0) throw new Error(`oldText not found in ${operation.path}`);
-	if (occurrences > 1) {
-		throw new Error(`oldText matched ${occurrences} times in ${operation.path}; make it unique`);
-	}
-	return before.replace(operation.oldText, operation.newText);
+	return replaceUniqueText(before, operation.oldText, operation.newText, operation.path);
 }
 
 async function restore(snapshots: PatchSnapshot[]): Promise<void> {
+	const errors: Error[] = [];
 	for (const snapshot of [...snapshots].reverse()) {
-		if (snapshot.before === null) {
-			await rm(snapshot.path, { force: true }).catch(() => undefined);
-		} else {
-			await atomicWriteFile(snapshot.path, snapshot.before);
+		try {
+			if (snapshot.before === null) {
+				await rm(snapshot.path, { force: true });
+			} else {
+				await atomicWriteFile(snapshot.path, snapshot.before);
+			}
+		} catch (error) {
+			errors.push(new Error(`Could not roll back ${snapshot.path}`, { cause: error }));
 		}
 	}
+	if (errors.length)
+		throw new AggregateError(errors, errors.map((error) => error.message).join("\n"));
 }
 
 async function verifyPatchIsCurrent(snapshots: PatchSnapshot[]): Promise<void> {
@@ -86,7 +125,7 @@ async function verifyPatchIsCurrent(snapshots: PatchSnapshot[]): Promise<void> {
 			if (exists) conflicts.push(snapshot.path);
 			continue;
 		}
-		if (!exists || sha256(await file.text()) !== sha256(snapshot.after)) {
+		if (!exists || sha256(await readPatchText(snapshot.path)) !== sha256(snapshot.after)) {
 			conflicts.push(snapshot.path);
 		}
 	}
@@ -104,16 +143,33 @@ export async function applyStructuredPatch(
 ): Promise<PatchResult> {
 	const snapshots: PatchSnapshot[] = [];
 	const seen = new Set<string>();
+	let batchBytes = 0;
 
-	for (const operation of operations) {
+	for (const operation of structuredPatchSchema.parse({ operations }).operations) {
 		const authorized = await boundary.authorize(operation.path, "write");
-		if (seen.has(authorized.canonicalPath)) {
+		const key =
+			process.platform === "win32"
+				? authorized.canonicalPath.toLowerCase()
+				: authorized.canonicalPath;
+		if (seen.has(key)) {
 			throw new Error(`Patch contains multiple operations for ${operation.path}`);
 		}
-		seen.add(authorized.canonicalPath);
+		seen.add(key);
 
-		const before = authorized.exists ? await Bun.file(authorized.canonicalPath).text() : null;
+		const before = authorized.exists ? await readPatchText(authorized.canonicalPath) : null;
 		const after = applyOperation(operation, before);
+		const afterBytes = after === null ? 0 : Buffer.byteLength(after, "utf8");
+		if (
+			afterBytes > MAX_PATCH_FILE_BYTES ||
+			after?.includes("\0") ||
+			(after !== null && !after.isWellFormed())
+		) {
+			throw new Error(
+				`Text patch output must be valid Unicode, at most 8 MiB, without NUL bytes: ${operation.path}`,
+			);
+		}
+		batchBytes += Buffer.byteLength(before ?? "", "utf8") + afterBytes;
+		if (batchBytes > MAX_PATCH_BATCH_BYTES) throw new Error("Text patch batch exceeds 32 MiB");
 		snapshots.push({ path: authorized.canonicalPath, before, after });
 	}
 
@@ -128,7 +184,15 @@ export async function applyStructuredPatch(
 			applied.push(snapshot);
 		}
 	} catch (error) {
-		await restore(applied);
+		try {
+			await restore(applied);
+		} catch (rollbackError) {
+			throw new AggregateError(
+				[error, rollbackError],
+				`Patch failed and rollback was incomplete: ${String(rollbackError)}`,
+				{ cause: error },
+			);
+		}
 		throw error;
 	}
 
@@ -141,7 +205,28 @@ export async function applyStructuredPatch(
 	};
 }
 
-export async function restorePatch(snapshots: PatchSnapshot[]): Promise<void> {
+export async function restorePatch(
+	snapshots: PatchSnapshot[],
+	boundary: WorkspaceBoundary,
+): Promise<void> {
+	for (const snapshot of snapshots) {
+		const authorized = await boundary.authorize(snapshot.path, "write");
+		if (authorized.canonicalPath !== snapshot.path) {
+			throw new Error(`Undo stopped because a patched path was redirected: ${snapshot.path}`);
+		}
+	}
 	await verifyPatchIsCurrent(snapshots);
-	await restore(snapshots);
+	// Undo uses the same preflight and rollback guarantees as a forward patch.
+	await applyStructuredPatch(
+		boundary,
+		[...snapshots].reverse().map((snapshot): PatchOperation => {
+			if (snapshot.after === null) {
+				return { type: "create", path: snapshot.path, content: snapshot.before ?? "" };
+			}
+			const expectedSha256 = sha256(snapshot.after);
+			return snapshot.before === null
+				? { type: "delete", path: snapshot.path, expectedSha256 }
+				: { type: "update", path: snapshot.path, content: snapshot.before, expectedSha256 };
+		}),
+	);
 }

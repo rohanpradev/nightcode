@@ -1,5 +1,5 @@
 import { rm } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 const modes = ["bundle", "compile", "bytecode"] as const;
 type BuildMode = (typeof modes)[number];
@@ -56,13 +56,41 @@ const commonOptions = {
 	format: "esm" as const,
 	external: nativeBackends.filter((backend) => backend !== currentBackend),
 	minify: true,
+	check: true,
 };
 
 if (mode === "bundle") {
+	const nativeEntry = Bun.resolveSync(
+		currentBackend,
+		dirname(Bun.resolveSync("@opentui/core", packageRoot)),
+	);
 	await Bun.build({
 		...commonOptions,
 		outdir: outputDirectory,
 		sourcemap: "external",
+		plugins: [
+			{
+				name: "bundle-relative-native-library",
+				setup(build) {
+					build.onResolve({ filter: /^@opentui\/core-(darwin|linux|win32)-/ }, (args) => {
+						if (args.path !== currentBackend) return;
+						return { path: `${nativeEntry}.wrapper`, namespace: "nightcode-native-library" };
+					});
+					build.onResolve({ filter: /.*/, namespace: "nightcode-native-library" }, (args) => {
+						if (args.path === nativeEntry) return { path: nativeEntry, namespace: "file" };
+						return undefined;
+					});
+					build.onLoad({ filter: /.*/, namespace: "nightcode-native-library" }, () => ({
+						loader: "js",
+						// OpenTUI passes its file import directly to dlopen. Resolve emitted assets
+						// against the bundle so launching from another directory still works.
+						contents: `import libraryPath from ${JSON.stringify(nativeEntry)};
+import { fileURLToPath } from "node:url";
+export default fileURLToPath(new URL(libraryPath, import.meta.url));`,
+					}));
+				},
+			},
+		],
 	});
 } else {
 	const executableName = `nightcode${mode === "bytecode" ? "-bytecode" : ""}${
@@ -71,7 +99,11 @@ if (mode === "bundle") {
 	await Bun.build({
 		...commonOptions,
 		bytecode: mode === "bytecode",
-		compile: { outfile: join(outputDirectory, executableName) },
+		compile: {
+			outfile: join(outputDirectory, executableName),
+			autoloadDotenv: false,
+			autoloadBunfig: false,
+		},
 		sourcemap: "linked",
 	});
 }

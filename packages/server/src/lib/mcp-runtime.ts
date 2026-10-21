@@ -1,9 +1,12 @@
+import type { LookupAddress } from "node:dns";
+import { lookup } from "node:dns/promises";
 import { realpath } from "node:fs/promises";
-import { isIP } from "node:net";
+import { BlockList, isIP } from "node:net";
 import { delimiter, resolve } from "node:path";
 import { createMCPClient, type MCPClient, type MCPClientConfig } from "@ai-sdk/mcp";
 import { Experimental_StdioMCPTransport } from "@ai-sdk/mcp/mcp-stdio";
 import type { ToolSet } from "ai";
+import { fetch as bunFetch } from "bun";
 import type { MCPServerConfig } from "./config-loader";
 import { optionalEnv } from "./env";
 import { createToolEnvironment } from "./shell-policy";
@@ -58,13 +61,15 @@ export async function connectMCPTools(
 									args: config.args,
 									cwd: workspaceRoot,
 									env: { ...(await createToolEnvironment(workspaceRoot)), ...(config.env ?? {}) },
-									stderr: "pipe",
+									// The transport does not consume stderr; an unread pipe can block the child.
+									stderr: "ignore",
 								})
 							: {
 									type: "http",
 									url: config.url as string,
 									headers: config.headers,
 									redirect: "error",
+									fetch: createMCPHttpFetch(config.url as string),
 								},
 					clientName: "nightcode",
 					version: "1.0.0",
@@ -125,123 +130,177 @@ export async function isMCPWorkspaceTrusted(workspaceRoot: string): Promise<bool
 	return false;
 }
 
+const blockedAddresses = new BlockList();
+for (const [address, prefix] of [
+	["0.0.0.0", 8],
+	["10.0.0.0", 8],
+	["100.64.0.0", 10],
+	["127.0.0.0", 8],
+	["169.254.0.0", 16],
+	["172.16.0.0", 12],
+	["192.0.0.0", 24],
+	["192.0.2.0", 24],
+	["192.88.99.0", 24],
+	["192.168.0.0", 16],
+	["198.18.0.0", 15],
+	["198.51.100.0", 24],
+	["203.0.113.0", 24],
+	["224.0.0.0", 4],
+	["240.0.0.0", 4],
+] as const) {
+	blockedAddresses.addSubnet(address, prefix);
+}
+blockedAddresses.addAddress("168.63.129.16"); // Azure metadata / virtual platform address.
+for (const [address, prefix] of [
+	["::", 96],
+	["64:ff9b::", 96], // NAT64 can translate directly to private IPv4 destinations.
+	["64:ff9b:1::", 48],
+	["100::", 64],
+	["100:0:0:1::", 64],
+	["2001::", 23],
+	["2001:db8::", 32],
+	["2002::", 16],
+	["3fff::", 20],
+	["5f00::", 16],
+	["fc00::", 7],
+	["fe80::", 10],
+	["fec0::", 10],
+	["ff00::", 8],
+] as const) {
+	blockedAddresses.addSubnet(address, prefix, "ipv6");
+}
+
+function mcpHostname(url: URL): string {
+	return url.hostname
+		.toLowerCase()
+		.replace(/^\[|\]$/g, "")
+		.replace(/\.$/, "");
+}
+
+function isLoopbackAddress(host: string): boolean {
+	// URL already normalizes unusual IPv4 literal encodings. Mapped IPv6 loopback
+	// remains blocked, matching the HTTP policy for explicitly configured loopback.
+	return (isIP(host) === 4 && host.startsWith("127.")) || host === "::1";
+}
+
+function isBlockedAddress(address: string): boolean {
+	const version = isIP(address);
+	return version === 0 || blockedAddresses.check(address, version === 4 ? "ipv4" : "ipv6");
+}
+
 export function validateMCPHttpUrl(value: string): void {
 	const url = new URL(value);
 	if (url.username || url.password)
 		throw new Error("MCP URLs must not contain embedded credentials");
-	const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
-	const literal = parseIpLiteral(host);
-	const loopback = host === "localhost" || (literal ? isLoopbackAddress(literal) : false);
+	const host = mcpHostname(url);
+	const loopback = host === "localhost" || isLoopbackAddress(host);
 	if (url.protocol !== "https:" && !(url.protocol === "http:" && loopback)) {
 		throw new Error("Remote MCP servers require HTTPS; HTTP is allowed only for loopback");
 	}
-	if (!loopback && isPrivateOrMetadataHost(host, literal)) {
+	if (
+		!loopback &&
+		(host.endsWith(".internal") ||
+			host.endsWith(".local") ||
+			(isIP(host) !== 0 && isBlockedAddress(host)))
+	) {
 		throw new Error(`MCP URL targets a private, link-local, or metadata host: ${host}`);
 	}
 }
 
-interface IpLiteral {
-	version: 4 | 6;
-	bytes: number[];
-}
+type ResolveMCPHost = (hostname: string) => Promise<LookupAddress[]>;
 
-function isPrivateOrMetadataHost(host: string, literal = parseIpLiteral(host)): boolean {
-	if (
-		host === "metadata.google.internal" ||
-		host.endsWith(".internal") ||
-		host.endsWith(".local")
-	) {
-		return true;
-	}
-	if (!literal) return false;
-	if (literal.version === 4) return isBlockedIPv4(literal.bytes);
-
-	const bytes = literal.bytes;
-	if (isIPv4MappedIPv6(bytes)) {
-		// Mapped loopback addresses are deliberately not treated as HTTP loopback. They are
-		// rejected here when their embedded IPv4 target is not safe for remote access.
-		return isBlockedIPv4(bytes.slice(12));
-	}
-	const unspecified = bytes.every((byte) => byte === 0);
-	const first = bytes[0] ?? 0;
-	const second = bytes[1] ?? 0;
-	const uniqueLocal = (first & 0xfe) === 0xfc;
-	const linkLocal = first === 0xfe && (second & 0xc0) === 0x80;
-	return unspecified || uniqueLocal || linkLocal;
-}
-
-function isLoopbackAddress(literal: IpLiteral): boolean {
-	if (literal.version === 4) return literal.bytes[0] === 127;
-	if (isIPv4MappedIPv6(literal.bytes)) return false;
-	return literal.bytes.slice(0, 15).every((byte) => byte === 0) && literal.bytes[15] === 1;
-}
-
-function isBlockedIPv4(bytes: number[]): boolean {
-	if (bytes.length !== 4) return true;
-	const [first = -1, second = -1, third = -1, fourth = -1] = bytes;
-	return (
-		first === 0 ||
-		first === 10 ||
-		first === 127 ||
-		(first === 169 && second === 254) ||
-		(first === 172 && second >= 16 && second <= 31) ||
-		(first === 192 && second === 168) ||
-		// Well-known cloud metadata service addresses outside RFC 1918 ranges.
-		(first === 168 && second === 63 && third === 129 && fourth === 16) ||
-		(first === 100 && second === 100 && third === 100 && fourth === 200)
-	);
-}
-
-function isIPv4MappedIPv6(bytes: number[]): boolean {
-	return (
-		bytes.length === 16 &&
-		bytes.slice(0, 10).every((byte) => byte === 0) &&
-		bytes[10] === 0xff &&
-		bytes[11] === 0xff
-	);
-}
-
-function parseIpLiteral(host: string): IpLiteral | null {
-	const version = isIP(host);
-	if (version === 4) {
-		const bytes = host.split(".").map(Number);
-		return bytes.length === 4 &&
-			bytes.every((byte) => Number.isInteger(byte) && byte >= 0 && byte <= 255)
-			? { version, bytes }
-			: null;
-	}
-	if (version !== 6) return null;
-
-	const halves = host.split("::");
-	if (halves.length > 2) return null;
-	const left = parseIPv6Groups(halves[0] ?? "");
-	const right = halves.length === 2 ? parseIPv6Groups(halves[1] ?? "") : [];
-	if (!left || !right) return null;
-	const omitted = 8 - left.length - right.length;
-	if ((halves.length === 1 && omitted !== 0) || (halves.length === 2 && omitted < 1)) return null;
-	const groups = [...left, ...Array.from({ length: omitted }, () => 0), ...right];
-	if (groups.length !== 8) return null;
-	return {
-		version,
-		bytes: groups.flatMap((group) => [group >>> 8, group & 0xff]),
-	};
-}
-
-function parseIPv6Groups(value: string): number[] | null {
-	if (!value) return [];
-	const segments = value.split(":");
-	const groups: number[] = [];
-	for (const [index, segment] of segments.entries()) {
-		if (segment.includes(".")) {
-			if (index !== segments.length - 1 || isIP(segment) !== 4) return null;
-			const [first = 0, second = 0, third = 0, fourth = 0] = segment.split(".").map(Number);
-			groups.push((first << 8) | second, (third << 8) | fourth);
-			continue;
+/** Resolve once per request and dial the validated address directly to prevent DNS rebinding. */
+export function createMCPHttpFetch(
+	endpoint: string,
+	resolveHost: ResolveMCPHost = (hostname) => lookup(hostname, { all: true, verbatim: true }),
+) {
+	validateMCPHttpUrl(endpoint);
+	const origin = new URL(endpoint).origin;
+	const secureFetch = async (
+		input: string | URL | Request,
+		init?: RequestInit,
+	): Promise<Response> => {
+		const request =
+			input instanceof Request
+				? new Request(input, init)
+				: new Request(input instanceof URL ? input.href : input, init);
+		const url = new URL(request.url);
+		validateMCPHttpUrl(url.href);
+		if (url.origin !== origin) throw new Error("MCP requests must stay on the configured origin");
+		request.signal.throwIfAborted();
+		const host = mcpHostname(url);
+		const family = isIP(host);
+		const addresses = family
+			? [{ address: host, family }]
+			: await resolveMCPHost(host, resolveHost, request.signal);
+		const allowLoopback = host === "localhost" || isLoopbackAddress(host);
+		if (
+			addresses.length === 0 ||
+			addresses.some(({ address }) =>
+				allowLoopback ? !isLoopbackAddress(address) : isBlockedAddress(address),
+			)
+		) {
+			throw new Error(
+				`MCP hostname resolves to a private, reserved, or non-loopback address: ${host}`,
+			);
 		}
-		if (!/^[\da-f]{1,4}$/i.test(segment)) return null;
-		groups.push(Number.parseInt(segment, 16));
-	}
-	return groups;
+		const target = addresses[0];
+		if (!target) throw new Error(`MCP hostname has no addresses: ${host}`);
+		request.signal.throwIfAborted();
+		const headers = new Headers(request.headers);
+		headers.set("host", url.host);
+		headers.delete("content-length");
+		headers.delete("transfer-encoding");
+		const pinnedUrl = new URL(url);
+		pinnedUrl.hostname = target.family === 6 ? `[${target.address}]` : target.address;
+		// Bun's native fetch keeps streaming, decompression, and cancellation intact.
+		// Explicit TLS identity and a direct connection preserve the checked DNS result.
+		const response = await bunFetch(pinnedUrl, {
+			method: request.method,
+			headers,
+			body: request.body,
+			signal: request.signal,
+			redirect: "manual",
+			proxy: false,
+			...(url.protocol === "https:" ? { tls: { serverName: host, rejectUnauthorized: true } } : {}),
+		});
+		if (response.status >= 300 && response.status < 400 && response.status !== 304) {
+			await response.body?.cancel();
+			throw new Error("MCP HTTP redirects are disabled");
+		}
+		return response;
+	};
+	// Eager connections would bypass the per-request URL and DNS checks.
+	return Object.assign(secureFetch, { preconnect: () => undefined });
+}
+
+function resolveMCPHost(
+	hostname: string,
+	resolveHost: ResolveMCPHost,
+	signal: AbortSignal,
+): Promise<LookupAddress[]> {
+	return new Promise((resolveAddresses, reject) => {
+		signal.throwIfAborted();
+		const abort = () => {
+			signal.removeEventListener("abort", abort);
+			reject(signal.reason);
+		};
+		signal.addEventListener("abort", abort, { once: true });
+		// OS DNS lookup cannot be cancelled, but an aborted request need not wait
+		// for it and a late resolution can never start an outgoing connection.
+		Promise.resolve()
+			.then(() => resolveHost(hostname))
+			.then(
+				(addresses) => {
+					signal.removeEventListener("abort", abort);
+					resolveAddresses(addresses);
+				},
+				(error) => {
+					signal.removeEventListener("abort", abort);
+					reject(error);
+				},
+			);
+	});
 }
 
 function configuredMCPTimeout(): number {

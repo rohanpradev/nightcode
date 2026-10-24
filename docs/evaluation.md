@@ -33,16 +33,16 @@ The final local checks ran on Windows x64 with Bun 1.4.3 and the refreshed AI SD
 MCP 2.0.80 lockfile. Networking, TLS, temporary Git repositories, and file replacement fixtures
 ran with normal host permissions because the restricted execution sandbox blocks those operations.
 
-| Check | Result |
-| --- | --- |
-| `bun ci` | Frozen install accepted; no changes. |
-| `bun run verify` | Formatting, lint, workspace/scripts type checks, migration validation, tests, coverage floors, and every package build passed. |
-| Test suite | 261 passed, zero failed, across 30 files. |
-| Weighted source coverage | 84.13% lines; 71.92% functions. |
-| `bun run test:stress` | 783 passed, zero failed; three randomized repetitions, seed `2652802443`. |
-| Source and JavaScript bundle UI smoke checks | Passed; terminal startup and asynchronous shutdown succeeded. |
-| Standalone and bytecode executable UI smoke checks | Both builds and native terminal startup/shutdown passed; the distributable JavaScript bundle was restored afterward. |
-| Dependency checks | No outdated direct dependencies; no reported vulnerabilities across 118 audited packages. |
+| Check                                              | Result                                                                                                                         |
+| -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| `bun ci`                                           | Frozen install accepted; no changes.                                                                                           |
+| `bun run verify`                                   | Formatting, lint, workspace/scripts type checks, migration validation, tests, coverage floors, and every package build passed. |
+| Test suite                                         | 261 passed, zero failed, across 30 files.                                                                                      |
+| Weighted source coverage                           | 84.13% lines; 71.92% functions.                                                                                                |
+| `bun run test:stress`                              | 783 passed, zero failed; three randomized repetitions, seed `2652802443`.                                                      |
+| Source and JavaScript bundle UI smoke checks       | Passed; terminal startup and asynchronous shutdown succeeded.                                                                  |
+| Standalone and bytecode executable UI smoke checks | Both builds and native terminal startup/shutdown passed; the distributable JavaScript bundle was restored afterward.           |
+| Dependency checks                                  | No outdated direct dependencies; no reported vulnerabilities across 118 audited packages.                                      |
 
 The new regressions exercise completed/pending approval compaction, signed Claude history and
 tool-schema drift before resumed execution, exact live model limits, metadata cancellation,

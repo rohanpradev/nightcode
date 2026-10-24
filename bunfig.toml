@@ -1,5 +1,15 @@
 env = false
 
+[fmt]
+printWidth = 100
+useTabs = true
+tabWidth = 2
+semi = true
+singleQuote = false
+trailingComma = "all"
+endOfLine = "lf"
+ignorePatterns = ["packages/database/drizzle/**/snapshot.json"]
+
 [test]
 coverageDir = "./coverage"
 coverageSkipTestFiles = true

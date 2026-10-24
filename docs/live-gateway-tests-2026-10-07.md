@@ -10,15 +10,15 @@ provider, and the production runtime and file tools. No mock models were used.
 **GPT-4.1 mini passed all seven checks.** GPT-4.1 nano passed the transport and approval checks but
 failed the README preservation task. This is a small integration sample, not a model benchmark.
 
-| Check | Mini outcome |
-| --- | --- |
-| HTTP authentication and workspace boundary | Unauthenticated calls returned 401; outside-workspace requests returned 403 |
-| Streaming reply and usage | Exact requested text, validated event stream, nonzero token counts |
-| Non-stream README task | Real agent completed with file tools; original content and requested additions verified |
-| Literal file edit | Dollar replacement tokens, UTF-8 BOM, and CRLF preserved in saved bytes |
-| Approved undo and duplicate decision | No mutation before approval; original restored afterward; replay executed no tool |
-| Denied deletion | Fixture remained unchanged before and after denial |
-| Session cleanup | Completed sessions were released; approval-pending session deletion had returned 409 |
+| Check                                      | Mini outcome                                                                            |
+| ------------------------------------------ | --------------------------------------------------------------------------------------- |
+| HTTP authentication and workspace boundary | Unauthenticated calls returned 401; outside-workspace requests returned 403             |
+| Streaming reply and usage                  | Exact requested text, validated event stream, nonzero token counts                      |
+| Non-stream README task                     | Real agent completed with file tools; original content and requested additions verified |
+| Literal file edit                          | Dollar replacement tokens, UTF-8 BOM, and CRLF preserved in saved bytes                 |
+| Approved undo and duplicate decision       | No mutation before approval; original restored afterward; replay executed no tool       |
+| Denied deletion                            | Fixture remained unchanged before and after denial                                      |
+| Session cleanup                            | Completed sessions were released; approval-pending session deletion had returned 409    |
 
 ## Trials and estimated spending
 
@@ -26,12 +26,12 @@ Prices were fetched from the [live Gateway model catalog](https://ai-gateway.ver
 Estimates use reported input/output tokens at standard catalog rates, without cache discounts;
 they are not a billing receipt. Failed model runs are included.
 
-| Trial | Result | Input tokens | Output tokens | Estimated USD |
-| --- | --- | ---: | ---: | ---: |
-| Nano, 6-step limit | 4/7 checks; README exhausted steps; BOM check had a test-reader bug, blocking undo test | 21,399 | 776 | 0.0024503 |
-| Nano, 10-step limit | 6/7 checks; README introduction was lost despite a success response | 28,005 | 944 | 0.0031781 |
-| Mini, 10-step limit | 7/7 checks passed | 23,559 | 1,115 | 0.0112076 |
-| **Total** | | **72,963** | **2,835** | **0.0168360** |
+| Trial               | Result                                                                                  | Input tokens | Output tokens | Estimated USD |
+| ------------------- | --------------------------------------------------------------------------------------- | -----------: | ------------: | ------------: |
+| Nano, 6-step limit  | 4/7 checks; README exhausted steps; BOM check had a test-reader bug, blocking undo test |       21,399 |           776 |     0.0024503 |
+| Nano, 10-step limit | 6/7 checks; README introduction was lost despite a success response                     |       28,005 |           944 |     0.0031781 |
+| Mini, 10-step limit | 7/7 checks passed                                                                       |       23,559 |         1,115 |     0.0112076 |
+| **Total**           |                                                                                         |   **72,963** |     **2,835** | **0.0168360** |
 
 The BOM false failure came from `Bun.file().text()` stripping a BOM during test verification.
 Byte inspection showed that the production edit had preserved it. The grader now uses Node's

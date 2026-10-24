@@ -8,6 +8,7 @@ function launchServer(port: number, watch: boolean) {
 		[process.execPath, ...(watch ? ["--watch"] : []), "run", "src/index.ts"],
 		{
 			cwd: serverDirectory,
+			detached: process.platform !== "win32",
 			env: {
 				...process.env,
 				PORT: String(port),
@@ -28,13 +29,29 @@ function launchServer(port: number, watch: boolean) {
 		output += decoder.decode();
 	}
 	const collected = Promise.all([collect(child.stdout), collect(child.stderr)]);
-	const timeout = setTimeout(() => child.kill(), 8000);
+	let terminated = false;
+	function terminate() {
+		if (terminated) return;
+		terminated = true;
+		if (process.platform === "win32") {
+			child.kill("SIGKILL");
+			return;
+		}
+		// Watch mode has a supervisor as well as the server. Kill the isolated
+		// process group so neither can keep the output pipes or test alive.
+		try {
+			process.kill(-child.pid, "SIGKILL");
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+		}
+	}
+	const timeout = setTimeout(terminate, 8000);
 	return {
 		child,
 		output: () => output,
 		async stop() {
 			clearTimeout(timeout);
-			child.kill();
+			terminate();
 			await child.exited;
 			await collected;
 		},

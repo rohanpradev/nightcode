@@ -59,17 +59,17 @@ configuration, change `NIGHTCODE_PROVIDER` to `openai` or `anthropic`, select a 
 and configure Gateway authentication. Azure deployment names and provider API keys cannot be used
 as Gateway credentials or model IDs.
 
-| Variable | Purpose |
-|---|---|
-| `NIGHTCODE_TEMPERATURE` | Model sampling temperature, omitted for GPT-6 reasoning requests |
-| `NIGHTCODE_REASONING_EFFORT` | Provider reasoning-effort hint: `none`, `low`, `medium`, `high`, `xhigh`, or `max` |
-| `NIGHTCODE_TEXT_VERBOSITY` | OpenAI response detail: `low`, `medium`, or `high` |
-| `NIGHTCODE_AGENT_MODE` | Set `false` for a single model response with no tools |
-| `NIGHTCODE_SYSTEM_PROMPT` | User-owned base system prompt |
-| `NIGHTCODE_ALLOW_PROJECT_MODEL` | Set `true` to permit a repository to select its `model` |
-| `NIGHTCODE_ALLOWED_PATHS` | Additional absolute roots, separated by the platform path delimiter |
-| `NIGHTCODE_DISABLED_TOOLS` | Comma-separated built-in or namespaced MCP tool names |
-| `NIGHTCODE_DEBUG_STREAM` | Enable additional local stream diagnostics |
+| Variable                        | Purpose                                                                            |
+| ------------------------------- | ---------------------------------------------------------------------------------- |
+| `NIGHTCODE_TEMPERATURE`         | Model sampling temperature, omitted for GPT-6 reasoning requests                   |
+| `NIGHTCODE_REASONING_EFFORT`    | Provider reasoning-effort hint: `none`, `low`, `medium`, `high`, `xhigh`, or `max` |
+| `NIGHTCODE_TEXT_VERBOSITY`      | OpenAI response detail: `low`, `medium`, or `high`                                 |
+| `NIGHTCODE_AGENT_MODE`          | Set `false` for a single model response with no tools                              |
+| `NIGHTCODE_SYSTEM_PROMPT`       | User-owned base system prompt                                                      |
+| `NIGHTCODE_ALLOW_PROJECT_MODEL` | Set `true` to permit a repository to select its `model`                            |
+| `NIGHTCODE_ALLOWED_PATHS`       | Additional absolute roots, separated by the platform path delimiter                |
+| `NIGHTCODE_DISABLED_TOOLS`      | Comma-separated built-in or namespaced MCP tool names                              |
+| `NIGHTCODE_DEBUG_STREAM`        | Enable additional local stream diagnostics                                         |
 
 ## Policy precedence
 
@@ -98,22 +98,22 @@ Ignored or capped settings are surfaced as runtime-policy diagnostics instead of
 `.nightcode/config.yaml` is strictly validated, canonically contained inside the workspace, and
 size-bounded. Invalid values are reported in runtime instructions.
 
-| Field | Effective behavior |
-|---|---|
-| `model` | Used only when trusted `NIGHTCODE_ALLOW_PROJECT_MODEL=true` |
-| `mode` | `BUILD` or restrictive `PLAN` |
-| `approvalMode` | `always`, `on-risk`, or denial-oriented `never`, combined with trusted policy |
-| `maxTokens` | May lower the maximum model output tokens |
-| `temperature` | Sampling temperature; trusted environment takes precedence |
-| `maxRetries` | May lower the provider retry budget |
-| `maxAgentSteps` | May lower the tool-loop step budget |
-| `maxToolOutputChars` | May lower the per-tool output bound |
-| `maxToolTimeoutMs` | May lower the shell timeout ceiling |
-| `maxRunDurationMs` | May lower the complete run deadline |
-| `contextBudget` | May lower the repository-map token budget |
-| `allowedPaths` | Compatibility field; ignored with a diagnostic |
-| `disabledTools` | Additive built-in or namespaced MCP tools to omit |
-| `requirePlanForEdits` | May require a live in-progress plan item before mutation |
+| Field                 | Effective behavior                                                            |
+| --------------------- | ----------------------------------------------------------------------------- |
+| `model`               | Used only when trusted `NIGHTCODE_ALLOW_PROJECT_MODEL=true`                   |
+| `mode`                | `BUILD` or restrictive `PLAN`                                                 |
+| `approvalMode`        | `always`, `on-risk`, or denial-oriented `never`, combined with trusted policy |
+| `maxTokens`           | May lower the maximum model output tokens                                     |
+| `temperature`         | Sampling temperature; trusted environment takes precedence                    |
+| `maxRetries`          | May lower the provider retry budget                                           |
+| `maxAgentSteps`       | May lower the tool-loop step budget                                           |
+| `maxToolOutputChars`  | May lower the per-tool output bound                                           |
+| `maxToolTimeoutMs`    | May lower the shell timeout ceiling                                           |
+| `maxRunDurationMs`    | May lower the complete run deadline                                           |
+| `contextBudget`       | May lower the repository-map token budget                                     |
+| `allowedPaths`        | Compatibility field; ignored with a diagnostic                                |
+| `disabledTools`       | Additive built-in or namespaced MCP tools to omit                             |
+| `requirePlanForEdits` | May require a live in-progress plan item before mutation                      |
 
 Example restrictive project policy:
 
@@ -146,13 +146,13 @@ under non-interactive policy.
 
 ## HTTP service
 
-| Variable | Purpose |
-|---|---|
-| `NIGHTCODE_HOST` | Bind address; defaults to `127.0.0.1` |
-| `NIGHTCODE_PORT` or `PORT` | Listen port; defaults to `3000` |
-| `NIGHTCODE_API_TOKEN` | Bearer token required on every route when configured; mandatory off loopback |
-| `NIGHTCODE_SERVER_WORKSPACE_ROOTS` | Canonical workspace roots separated by the platform path delimiter |
-| `NIGHTCODE_SERVER_URL` | Base URL for HTTP-client integrations; the TUI uses the embedded runtime |
+| Variable                           | Purpose                                                                      |
+| ---------------------------------- | ---------------------------------------------------------------------------- |
+| `NIGHTCODE_HOST`                   | Bind address; defaults to `127.0.0.1`                                        |
+| `NIGHTCODE_PORT` or `PORT`         | Listen port; defaults to `3000`                                              |
+| `NIGHTCODE_API_TOKEN`              | Bearer token required on every route when configured; mandatory off loopback |
+| `NIGHTCODE_SERVER_WORKSPACE_ROOTS` | Canonical workspace roots separated by the platform path delimiter           |
+| `NIGHTCODE_SERVER_URL`             | Base URL for HTTP-client integrations; the TUI uses the embedded runtime     |
 
 The default workspace root is the server startup directory. Authentication is not encryption; use
 TLS termination for any non-local deployment. Request bodies are limited to 8 MiB.
@@ -163,22 +163,22 @@ TLS termination for any non-local deployment. Request bodies are limited to 8 Mi
 
 ```json
 {
-  "servers": {
-    "local-tools": {
-      "transport": "stdio",
-      "command": "bun",
-      "args": ["run", "tools/mcp-server.ts"],
-      "env": { "TOOL_MODE": "local" },
-      "allowedTools": ["lookup", "diagnose"],
-      "requireApproval": true
-    },
-    "remote-docs": {
-      "transport": "http",
-      "url": "https://example.com/mcp",
-      "allowedTools": ["search"],
-      "requireApproval": true
-    }
-  }
+	"servers": {
+		"local-tools": {
+			"transport": "stdio",
+			"command": "bun",
+			"args": ["run", "tools/mcp-server.ts"],
+			"env": { "TOOL_MODE": "local" },
+			"allowedTools": ["lookup", "diagnose"],
+			"requireApproval": true
+		},
+		"remote-docs": {
+			"transport": "http",
+			"url": "https://example.com/mcp",
+			"allowedTools": ["search"],
+			"requireApproval": true
+		}
+	}
 }
 ```
 

@@ -162,9 +162,7 @@ const MUTATION_TOOLS = new Set([
 const SENSITIVE_READ_TOOLS = new Set(["readFile", "readLines", "fileInfo"]);
 
 export type ToolApprovalDecision =
-	| { type: "approved" }
-	| { type: "user-approval" }
-	| { type: "denied"; reason: string };
+	{ type: "approved" } | { type: "user-approval" } | { type: "denied"; reason: string };
 
 export type ToolApprovalPolicyInput =
 	| { kind: "shell"; approvalMode: ApprovalMode; assessment: CommandAssessment }

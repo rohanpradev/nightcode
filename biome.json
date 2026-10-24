@@ -3,7 +3,7 @@
 		"includes": ["**", "!**/dist", "!node_modules", "!tmp", "!coverage"]
 	},
 	"formatter": {
-		"enabled": true,
+		"enabled": false,
 		"formatWithErrors": false,
 		"indentStyle": "tab",
 		"indentWidth": 2,

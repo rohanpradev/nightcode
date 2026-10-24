@@ -1,5 +1,1 @@
-export {
-	createNightcodeDatabase,
-	defaultDatabasePath,
-	initializeDatabase,
-} from "./db";
+export { createNightcodeDatabase, defaultDatabasePath, initializeDatabase } from "./db";

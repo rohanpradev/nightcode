@@ -212,8 +212,7 @@ describe("MCP runtime adapter", () => {
 
 	it("cancels a request while DNS is still pending", async () => {
 		let resolveLookup:
-			| ((addresses: Array<{ address: string; family: number }>) => void)
-			| undefined;
+			((addresses: Array<{ address: string; family: number }>) => void) | undefined;
 		const controller = new AbortController();
 		const reason = new Error("cancelled during DNS");
 		const secureFetch = createMCPHttpFetch(

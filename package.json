@@ -5,12 +5,12 @@
 	"type": "module",
 	"private": true,
 	"engines": {
-		"bun": ">=1.4.3"
+		"bun": ">=1.4.4"
 	},
-	"packageManager": "bun@1.4.3",
+	"packageManager": "bun@1.4.4",
 	"devDependencies": {
-		"@biomejs/biome": "^2.5.15",
-		"@types/bun": "1.4.3",
+		"@biomejs/biome": "^2.6.2",
+		"@types/bun": "1.4.4",
 		"typescript": "7.0.2"
 	},
 	"scripts": {
@@ -39,12 +39,13 @@
 		"db:studio": "bun run --cwd packages/database db:studio",
 		"db:migrate": "bun run --cwd packages/database db:migrate",
 		"check": "bun run --parallel format:check lint typecheck typecheck:scripts",
-		"check:fix": "bunx --no-install --bun @biomejs/biome check --write .",
-		"format": "bunx --no-install --bun @biomejs/biome format --write .",
-		"format:check": "bunx --no-install --bun @biomejs/biome format .",
+		"check:fix": "bunx --no-install --bun @biomejs/biome lint --write . && bun run format",
+		"format": "bun fmt --no-script",
+		"format:check": "bun fmt --no-script --check",
+		"format:changed": "bun fmt --no-script --changed=origin/main",
 		"lint": "bunx --no-install --bun @biomejs/biome lint .",
 		"typecheck": "bun run --parallel --filter '@nightcode/*' typecheck",
-		"typecheck:scripts": "bun --check --tsconfig-override scripts/tsconfig.json",
+		"typecheck:scripts": "bun check --no-script --project scripts/tsconfig.json",
 		"verify": "bun run check && bun run db:check && bun run test:coverage && bun run build",
 		"deps:check": "bun outdated --recursive",
 		"deps:audit": "bun audit",

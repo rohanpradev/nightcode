@@ -163,6 +163,10 @@ describe("shell policy", () => {
 	it.each(["timeout", "abort"] as const)(
 		"stops descendants and releases their output pipes on %s",
 		async (mode) => {
+			// A cold PowerShell plus two Bun processes can exceed 3.5 s on hosted
+			// Windows. Allow setup time while keeping cancellation bounded once ready.
+			const commandTimeoutMs = process.platform === "win32" ? 12_000 : 4000;
+			const startupTimeoutMs = process.platform === "win32" ? 10_000 : 3500;
 			const root = await mkdtemp(join(tmpdir(), "nightcode-shell-tree-"));
 			const parentPidFile = join(root, "parent.pid");
 			const childPidFile = join(root, "child.pid");
@@ -194,14 +198,14 @@ await child.exited;`,
 				command: scriptCommand(parentScript),
 				cwd: root,
 				workspaceRoot: root,
-				timeoutMs: mode === "timeout" ? 4000 : 10_000,
+				timeoutMs: mode === "timeout" ? commandTimeoutMs : 20_000,
 				maxOutputChars: 1000,
 				abortSignal: controller.signal,
 			});
 			void result.catch(() => {});
 			const pids: number[] = [];
 			try {
-				const readyDeadline = Date.now() + 3500;
+				const readyDeadline = Date.now() + startupTimeoutMs;
 				while (!(await Bun.file(childPidFile).exists())) {
 					if (Date.now() >= readyDeadline) throw new Error("shell descendant did not start");
 					await Bun.sleep(20);
@@ -212,7 +216,7 @@ await child.exited;`,
 					pids.push(pid);
 				}
 				if (mode === "abort") controller.abort(new Error("test stop"));
-				const output = await within(result, mode === "timeout" ? 5000 : 3000);
+				const output = await within(result, mode === "timeout" ? commandTimeoutMs + 1500 : 3000);
 				expect(output).toContain("child-ready");
 				expect(output).not.toContain("exitCode: 0");
 				const exitDeadline = Date.now() + 1000;
@@ -233,7 +237,7 @@ await child.exited;`,
 				);
 			}
 		},
-		12_000,
+		25_000,
 	);
 
 	it("does not launch a command aborted while its environment is being prepared", async () => {

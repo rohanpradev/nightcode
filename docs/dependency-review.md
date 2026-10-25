@@ -43,14 +43,16 @@ October 24 validation passed locally on Windows x64 with Bun 1.4.4:
 - `bun run verify`: formatter, Biome lint, workspace and script type checks, migration validation,
   261 tests, coverage floors, and all production bundles passed.
 - Weighted coverage: 80.68% lines and 68.70% functions, above the unchanged 65% / 55% floors.
-- `bun run test:stress`: 783 passes, zero failures (seed 2673548832).
+- `bun run test:stress`: 783 passes, zero failures (seed 578552922).
 - `bun run test:cli:smoke` and `bun run test:cli:bundle`: native UI startup and shutdown passed.
 
-The preceding CI run exposed two platform issues addressed in this refresh. `.gitattributes`
+CI runs exposed platform issues addressed in this refresh. `.gitattributes`
 now enforces LF for text checkouts, preventing Windows formatting failures. Startup tests launch
 Unix servers in an isolated process group and kill that group during cleanup, so Bun's watch
 supervisor cannot leave the test waiting on open output pipes. Hosted Windows and Linux outcomes
-are reported by the pull request's Verify checks.
+are reported by the pull request's Verify checks. Rollback fault-injection fixtures also
+canonicalize their temporary directory, matching the production boundary's real paths when a
+Windows runner exposes a shortened path such as `RUNNER~1`.
 
 ## October 20 refresh
 

@@ -223,21 +223,32 @@ function assertContained(root: string, candidate: string): void {
 async function readLimited(
 	stream: ReadableStream<Uint8Array>,
 	limit: number,
+	abortSignal: AbortSignal,
 ): Promise<{ text: string; discarded: number }> {
 	const reader = stream.getReader();
 	const decoder = new TextDecoder();
 	let text = "";
 	let discarded = 0;
-	while (true) {
-		const { done, value } = await reader.read();
-		if (done) break;
-		const chunk = decoder.decode(value, { stream: true });
+	const append = (chunk: string) => {
 		const remaining = Math.max(0, limit - text.length);
 		text += chunk.slice(0, remaining);
 		discarded += Math.max(0, chunk.length - remaining);
+	};
+	const cancel = () => void reader.cancel().catch(() => {});
+	if (abortSignal.aborted) cancel();
+	else abortSignal.addEventListener("abort", cancel, { once: true });
+	try {
+		while (true) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			append(decoder.decode(value, { stream: true }));
+		}
+		append(decoder.decode());
+		return { text, discarded };
+	} finally {
+		abortSignal.removeEventListener("abort", cancel);
+		reader.releaseLock();
 	}
-	text += decoder.decode();
-	return { text, discarded };
 }
 
 function shellCommand(command: string): string[] {
@@ -255,6 +266,48 @@ export interface RunShellOptions {
 	abortSignal?: AbortSignal;
 }
 
+/** Stop this command's descendants before its shell can disappear. */
+async function terminateProcessTree(proc: Bun.Subprocess): Promise<void> {
+	try {
+		if (process.platform === "win32") {
+			// taskkill needs the live parent to discover its descendants. Do not let
+			// Bun's per-process AbortSignal kill the shell before this runs.
+			if (proc.exitCode !== null) return;
+			const killer = Bun.spawn(
+				[
+					join(process.env.SystemRoot ?? "C:\\Windows", "System32", "taskkill.exe"),
+					"/PID",
+					String(proc.pid),
+					"/T",
+					"/F",
+				],
+				{
+					stdin: "ignore",
+					stdout: "ignore",
+					stderr: "ignore",
+					windowsHide: true,
+					timeout: 1000,
+					killSignal: "SIGKILL",
+				},
+			);
+			const exitCode = await killer.exited;
+			if (exitCode !== 0 && proc.exitCode === null) {
+				throw new Error(`Could not terminate shell process tree (taskkill exited ${exitCode})`);
+			}
+		} else {
+			// detached gives this command its own process group. A negative PID
+			// cannot reach the app, other sessions, or unrelated commands.
+			try {
+				process.kill(-proc.pid, "SIGKILL");
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+			}
+		}
+	} finally {
+		if (proc.exitCode === null) proc.kill("SIGKILL");
+	}
+}
+
 export async function runShellCommand(options: RunShellOptions): Promise<string> {
 	if (options.abortSignal?.aborted) {
 		throw options.abortSignal.reason ?? new Error("shell command aborted before start");
@@ -269,32 +322,49 @@ export async function runShellCommand(options: RunShellOptions): Promise<string>
 
 	try {
 		const readOnlyArgs = readOnlyGitArguments(options.command.trim().replace(/[\t ]+/g, " "));
+		const env = await createToolEnvironment(options.workspaceRoot);
+		controller.signal.throwIfAborted();
 		const proc = Bun.spawn(
 			readOnlyArgs
 				? ["git", "--no-pager", "-c", "core.fsmonitor=false", ...readOnlyArgs]
 				: shellCommand(options.command),
 			{
 				cwd: options.cwd,
-				env: await createToolEnvironment(options.workspaceRoot),
+				env,
 				stdout: "pipe",
 				stderr: "pipe",
-				signal: controller.signal,
+				detached: process.platform !== "win32",
+				windowsHide: true,
 			},
 		);
-		const [stdout, stderr, exitCode] = await Promise.all([
-			readLimited(proc.stdout, options.maxOutputChars),
-			readLimited(proc.stderr, options.maxOutputChars),
-			proc.exited,
-		]);
-		const truncated = stdout.discarded + stderr.discarded;
-		return [
-			`exitCode: ${exitCode}`,
-			stdout.text ? `stdout:\n${stdout.text.trimEnd()}` : "",
-			stderr.text ? `stderr:\n${stderr.text.trimEnd()}` : "",
-			truncated > 0 ? `[truncated ${truncated} chars]` : "",
-		]
-			.filter(Boolean)
-			.join("\n\n");
+		const outputController = new AbortController();
+		let termination: Promise<void> | undefined;
+		const terminate = () => {
+			termination ??= terminateProcessTree(proc).finally(() => outputController.abort());
+			return termination;
+		};
+		const onAbort = () => void terminate().catch(() => {});
+		controller.signal.addEventListener("abort", onAbort, { once: true });
+		try {
+			const [stdout, stderr, exitCode] = await Promise.all([
+				readLimited(proc.stdout, options.maxOutputChars, outputController.signal),
+				readLimited(proc.stderr, options.maxOutputChars, outputController.signal),
+				proc.exited,
+			]);
+			await termination;
+			const truncated = stdout.discarded + stderr.discarded;
+			return [
+				`exitCode: ${exitCode}`,
+				stdout.text ? `stdout:\n${stdout.text.trimEnd()}` : "",
+				stderr.text ? `stderr:\n${stderr.text.trimEnd()}` : "",
+				truncated > 0 ? `[truncated ${truncated} chars]` : "",
+			]
+				.filter(Boolean)
+				.join("\n\n");
+		} finally {
+			controller.signal.removeEventListener("abort", onAbort);
+			if (proc.exitCode === null) await terminate();
+		}
 	} finally {
 		clearTimeout(timeout);
 		options.abortSignal?.removeEventListener("abort", abort);

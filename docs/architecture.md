@@ -32,6 +32,13 @@ flowchart LR
 
 Repository indexes are keyed by normalized workspace root. Indexing records actual file modification times, excludes generated/vendor directories, and refreshes files after patch/write/edit/undo operations. Repository maps stay bounded by a token estimate.
 
+Indexing and default source search cover TypeScript and JavaScript module variants, including
+`.mts`, `.cts`, `.mjs`, and `.cjs`. The glob and grep include patterns use Bun's native extended
+glob matcher while canonical path authorization still controls which results can be opened.
+Line-range reads consume fixed-size UTF-8 chunks, discard skipped lines without accumulating them,
+and stop at the requested range or output allowance. An oversized selected line returns its
+line-numbered prefix followed by the truncation marker.
+
 Local compact mode does not pretend that substring truncation is a faithful summary. It emits an honest user-level context note, preserves recent messages, and instructs the agent to re-read state when missing history matters. Anthropic runs additionally enable native context editing and compaction.
 
 Within a run, `prepareStep` budgets model history with headroom for instructions, tool schemas,
@@ -54,6 +61,10 @@ detection. These terminal reasons remain incomplete outcomes for evaluation.
 ## Transport and durability
 
 The CLI defaults to an embedded runtime for zero-setup local use. The typed Hono client supports the same event contract over HTTP, including approval continuation and abort signals.
+
+The remote client frames NDJSON before decoding, with an 8 MiB UTF-8 byte limit per event. Its
+buffer grows geometrically, avoiding repeated scans of unfinished events arriving in small chunks.
+Terminal events and early consumer exits cancel the underlying response reader.
 
 Conversation sessions are stored in `~/.nightcode/nightcode.db` (or `$NIGHTCODE_HOME/.nightcode/nightcode.db`) with WAL and atomic upserts. Old JSON sessions are imported once without deleting the source file.
 

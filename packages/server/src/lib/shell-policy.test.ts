@@ -4,6 +4,41 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { assessShellCommand, createToolEnvironment, runShellCommand } from "./shell-policy";
 
+function scriptCommand(path: string): string {
+	const quote = (value: string) =>
+		process.platform === "win32"
+			? `'${value.replaceAll("'", "''")}'`
+			: `'${value.replaceAll("'", "'\\''")}'`;
+	return `${process.platform === "win32" ? "& " : ""}${quote(process.execPath)} ${quote(path)}`;
+}
+
+async function within<T>(promise: Promise<T>, milliseconds: number): Promise<T> {
+	let timeout: ReturnType<typeof setTimeout> | undefined;
+	try {
+		return await Promise.race([
+			promise,
+			new Promise<never>((_, reject) => {
+				timeout = setTimeout(
+					() => reject(new Error("shell cancellation did not finish")),
+					milliseconds,
+				);
+			}),
+		]);
+	} finally {
+		clearTimeout(timeout);
+	}
+}
+
+function processExists(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ESRCH") return false;
+		throw error;
+	}
+}
+
 describe("shell policy", () => {
 	it("never treats a command after a newline as read-only inspection", () => {
 		for (const separator of ["\n", "\r\n", "\r", "\0", "\u2028", "\u2029"]) {
@@ -123,5 +158,105 @@ describe("shell policy", () => {
 			if (previous == null) delete process.env.OPENAI_API_KEY;
 			else process.env.OPENAI_API_KEY = previous;
 		}
+	});
+
+	it.each(["timeout", "abort"] as const)(
+		"stops descendants and releases their output pipes on %s",
+		async (mode) => {
+			// A cold PowerShell plus two Bun processes can exceed 3.5 s on hosted
+			// Windows. Allow setup time while keeping cancellation bounded once ready.
+			const commandTimeoutMs = process.platform === "win32" ? 12_000 : 4000;
+			const startupTimeoutMs = process.platform === "win32" ? 10_000 : 3500;
+			const root = await mkdtemp(join(tmpdir(), "nightcode-shell-tree-"));
+			const parentPidFile = join(root, "parent.pid");
+			const childPidFile = join(root, "child.pid");
+			const parentScript = join(root, "parent.ts");
+			const childScript = join(root, "child.ts");
+			await writeFile(
+				childScript,
+				`import { rename } from "node:fs/promises";
+console.log("child-ready");
+await Bun.write(${JSON.stringify(`${childPidFile}.tmp`)}, String(process.pid));
+await rename(${JSON.stringify(`${childPidFile}.tmp`)}, ${JSON.stringify(childPidFile)});
+await Bun.sleep(30_000);`,
+			);
+			await writeFile(
+				parentScript,
+				`await Bun.write(${JSON.stringify(parentPidFile)}, String(process.pid));
+const child = Bun.spawn([process.execPath, ${JSON.stringify(childScript)}], {
+    stdin: "ignore", stdout: "inherit", stderr: "inherit"
+});
+await child.exited;`,
+			);
+			const unrelated = Bun.spawn([process.execPath, "-e", "await Bun.sleep(30_000)"], {
+				stdin: "ignore",
+				stdout: "ignore",
+				stderr: "ignore",
+			});
+			const controller = new AbortController();
+			const result = runShellCommand({
+				command: scriptCommand(parentScript),
+				cwd: root,
+				workspaceRoot: root,
+				timeoutMs: mode === "timeout" ? commandTimeoutMs : 20_000,
+				maxOutputChars: 1000,
+				abortSignal: controller.signal,
+			});
+			void result.catch(() => {});
+			const pids: number[] = [];
+			try {
+				const readyDeadline = Date.now() + startupTimeoutMs;
+				while (!(await Bun.file(childPidFile).exists())) {
+					if (Date.now() >= readyDeadline) throw new Error("shell descendant did not start");
+					await Bun.sleep(20);
+				}
+				for (const path of [parentPidFile, childPidFile]) {
+					const pid = Number(await readFile(path, "utf8"));
+					expect(Number.isSafeInteger(pid) && pid > 0).toBe(true);
+					pids.push(pid);
+				}
+				if (mode === "abort") controller.abort(new Error("test stop"));
+				const output = await within(result, mode === "timeout" ? commandTimeoutMs + 1500 : 3000);
+				expect(output).toContain("child-ready");
+				expect(output).not.toContain("exitCode: 0");
+				const exitDeadline = Date.now() + 1000;
+				while (pids.some(processExists) && Date.now() < exitDeadline) await Bun.sleep(20);
+				for (const pid of pids) expect(processExists(pid)).toBe(false);
+				expect(unrelated.exitCode).toBeNull();
+			} finally {
+				controller.abort();
+				// These PIDs belong only to this test's disposable fixture processes.
+				for (const pid of pids.reverse()) {
+					if (processExists(pid)) process.kill(pid, "SIGKILL");
+				}
+				unrelated.kill("SIGKILL");
+				await unrelated.exited;
+				await within(
+					result.catch(() => {}),
+					2000,
+				);
+			}
+		},
+		25_000,
+	);
+
+	it("does not launch a command aborted while its environment is being prepared", async () => {
+		const root = await mkdtemp(join(tmpdir(), "nightcode-shell-early-abort-"));
+		const script = join(root, "must-not-run.ts");
+		const marker = join(root, "started.txt");
+		await writeFile(script, `await Bun.write(${JSON.stringify(marker)}, "started");`);
+		const controller = new AbortController();
+		const reason = new Error("cancelled during preparation");
+		const result = runShellCommand({
+			command: scriptCommand(script),
+			cwd: root,
+			workspaceRoot: root,
+			timeoutMs: 5000,
+			maxOutputChars: 100,
+			abortSignal: controller.signal,
+		});
+		controller.abort(reason);
+		await expect(result).rejects.toBe(reason);
+		expect(await Bun.file(marker).exists()).toBe(false);
 	});
 });

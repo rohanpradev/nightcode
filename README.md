@@ -7,7 +7,7 @@ is required; provider API keys are not used.
 
 ## Quick start
 
-Install [Bun 1.4.3](https://bun.com/blog/bun-v1.4.3) or newer (`bun upgrade` updates an existing install).
+Install [Bun 1.4.4](https://bun.com/blog/bun-v1.4.4) or newer (`bun upgrade` updates an existing install).
 
 ```powershell
 bun install
@@ -80,7 +80,7 @@ See the [live test results](docs/live-gateway-tests-2026-10-07.md) for costs and
   narrow this envelope but cannot weaken it.
 - PLAN mode exposes inspection tools only, does not connect project MCP servers, and permits only
   the narrow low-risk shell inspection allowlist.
-- Risk-classified shell execution with approval modes, time/output bounds, cancellation, a minimal child environment, and provider-secret stripping.
+- Risk-classified shell execution with approval modes, time/output bounds, process-tree cancellation, a minimal child environment, and provider-secret stripping.
 - Sensitive-file reads require approval (or are denied by non-interactive policy); repository maps
   and literal search skip conventional credential and private-key paths.
 - Session/workspace-pinned HTTP routes, loopback-only default binding, optional bearer
@@ -95,10 +95,13 @@ See the [live test results](docs/live-gateway-tests-2026-10-07.md) for costs and
 - Atomic, idempotent approval resolution so a repeated response cannot execute a tool twice.
 - CLI startup validation, truthful pending/succeeded/failed tool traces, detailed approval cards,
   and a save-before-exit lifecycle.
-- Bun 1.4.3's built-in TypeScript checker, Drizzle ORM/Kit 1.0.0-rc.4,
-  AI SDK 7.0.146 with MCP 2.0.80, OpenTUI 0.6.6, React 19.3.1, Hono 4.13.13, Biome 2.5.15, and focused regression suites.
-- Demand-driven HTTP streaming with cancellation cleanup, bounded client event parsing, and
+- Bun 1.4.4's built-in formatter and TypeScript checker, Drizzle ORM/Kit 1.0.0-rc.4,
+  AI SDK 7.0.153 with MCP 2.0.84, OpenTUI 0.6.8, React 19.3.1, Hono 4.13.14, Biome 2.6.3 for linting, and focused regression suites.
+- Demand-driven HTTP streaming with cancellation cleanup, client events bounded by UTF-8 bytes, and
   failure-preserving run outcomes.
+- Streaming line reads that return a bounded prefix of oversized lines, and repository search/indexing
+  across `.ts`, `.tsx`, `.mts`, `.cts`, `.js`, `.jsx`, `.mjs`, and `.cjs` sources. Glob tools accept Bun's
+  extended patterns such as `**/!(*.test).ts` and `shard-{1..3}.json`.
 
 ## Agent controls
 
@@ -142,7 +145,7 @@ See [configuration](docs/configuration.md), [architecture](docs/architecture.md)
 [security](docs/security.md), [evaluation](docs/evaluation.md), and the
 [source-backed improvement plan](docs/improvement-plan.md). The [dependency review](docs/dependency-review.md)
 records the official documentation, selected versions, compatibility changes, and validation
-results for the October 20, 2026 upgrade. The [harness review](docs/harness-review.md) connects
+results for dependency upgrades, including the October 25, 2026 refresh. The [harness review](docs/harness-review.md) connects
 the current engineering research to implemented behavior and remaining evaluation work.
 
 ## API
@@ -180,6 +183,9 @@ and dependency-ordered production builds. Empty coverage reports fail the gate. 
 ```powershell
 bun run test:watch
 bun run test:stress
+bun run format
+bun run format:check
+bun fmt --changed
 bun run eval:harness
 bun run build:cli:compile
 bun run build:cli:bytecode
@@ -190,7 +196,7 @@ bun run clean
 ```
 
 The GitHub Actions workflow runs `bun ci`, `bun run verify`, and randomized repeat tests on
-Windows and Linux with Bun 1.4.3. Actions are pinned to commit hashes and coverage is retained
+Windows and Linux with Bun 1.4.4. Actions are pinned to commit hashes and coverage is retained
 for 14 days. Local package binaries run with `bunx --no-install`, so a missing development
 dependency fails instead of being downloaded implicitly.
 
@@ -204,10 +210,16 @@ automatic `.env` and `bunfig.toml` loading at build time. To launch a source ent
 from another directory, use `bun --no-env-file <entry>` so configuration comes from the trusted
 user settings described above.
 
+Formatting uses Bun's built-in `bun fmt`. The `[fmt]` section in `bunfig.toml` defines the shared
+style; `bun run format` writes changes and `bun run format:check` checks without writing.
+Use `bun fmt --changed` to format files that differ from the default branch. Biome handles linting
+only, so formatter output is enforced by a single tool.
+
 Workspace type checks use `bun check`; build scripts use `--check` or `Bun.build({ check: true })`.
-The root build-script check uses `bun --check --tsconfig-override scripts/tsconfig.json` because
-the root `check` script is the combined quality gate. TypeScript 7.0.2 remains installed for editor
-support and matches Bun 1.4.3's checker. No compiler API compatibility package is needed.
+The root build-script check uses `bun check --no-script --project scripts/tsconfig.json` because
+the root `check` script is the combined quality gate. Bun 1.4.4's `--no-script` selects the built-in
+checker even when a package defines a `check` script. TypeScript 7.0.2 remains installed for editor
+support. No compiler API compatibility package is needed.
 
 OpenTUI 0.6 restores the terminal asynchronously. CLI shutdown waits for `renderer.closed`
 before exiting, including the UI smoke test.

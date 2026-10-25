@@ -95,8 +95,10 @@ the boolean fsmonitor setting.
 
 The local shell runner is **not an operating-system sandbox**. An approved general-purpose command
 still has the host user's process, filesystem, and network permissions. Timeouts and cancellation
-signal the spawned shell process, but shells and tools may leave descendant processes running on
-platforms where terminating the parent does not terminate its process tree.
+terminate the command's isolated process group on Unix and use `taskkill /T /F` on Windows before
+the parent shell exits. Output readers are cancelled and released after termination. This cleans up
+ordinary descendants; deliberately detached or already orphaned processes can still escape that
+cleanup and require OS-level isolation.
 
 For untrusted autonomous workloads, run Night Code inside a disposable container or VM with
 filesystem and network policy. See the isolation guidance from

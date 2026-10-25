@@ -364,7 +364,7 @@ export async function refreshRepositoryIndex(
 		return 0;
 	}
 
-	const glob = new Bun.Glob("**/*.{ts,tsx,js,jsx,mjs,cts}");
+	const glob = new Bun.Glob("**/*.{ts,tsx,mts,cts,js,jsx,mjs,cjs}");
 	const excluded = new Set(["node_modules", ".git", "dist", ".next", "coverage", ".bun", ".cache"]);
 	let indexed = 0;
 	const seenCanonicalPaths = new Set<string>();

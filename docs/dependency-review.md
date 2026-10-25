@@ -1,22 +1,96 @@
-# Dependency review — October 20, 2026
+# Dependency review — October 25, 2026
 
 ## Current refresh
+
+Registry checks on October 25 found four new patch releases, now selected in the frozen lockfile:
+
+| Dependency               | October 24 | Selected October 25 |
+| ------------------------ | ---------- | ------------------- |
+| `ai` (server and shared) | 7.0.152    | 7.0.153             |
+| `@ai-sdk/mcp`            | 2.0.83     | 2.0.84              |
+| `hono` (CLI and server)  | 4.13.13    | 4.13.14             |
+| `@biomejs/biome`         | 2.6.2      | 2.6.3               |
+
+Bun remains at 1.4.4. Its [extended glob support](https://bun.com/blog/bun-v1.4.4#bun-glob-supports-extglob-and-brace-ranges)
+is now described and tested through the actual glob and grep tools, including excluded test-file
+patterns, brace ranges, and canonical-root protections. Indexing and default grep also discover
+modern `.mts`, `.cts`, `.mjs`, and `.cjs` modules consistently.
+
+The functionality review additionally replaces whole-line buffering in line-range reads, bounds
+NDJSON events by UTF-8 bytes, and adds shell process-tree cleanup on timeout or Stop. See
+[architecture](architecture.md) for behavior and [evaluation](evaluation.md) for validation.
+
+## October 24 refresh
+
+The October 24 refresh adopts [Bun 1.4.4](https://bun.com/blog/bun-v1.4.4) and updates the
+runtime minimum, package-manager pin, Bun types, and Windows/Linux CI together. Direct package
+updates preserve the existing version-range styles and paired OpenTUI versions.
+
+| Dependency                                 | October 20 baseline | Selected October 24 |
+| ------------------------------------------ | ------------------- | ------------------- |
+| Bun project minimum / package manager / CI | 1.4.3               | 1.4.4               |
+| `@types/bun`                               | 1.4.3               | 1.4.4               |
+| `@biomejs/biome`                           | 2.5.15              | 2.6.2               |
+| `@opentui/core`, `@opentui/react`          | 0.6.6               | 0.6.8               |
+| `ai` (server and shared)                   | 7.0.146             | 7.0.152             |
+| `@ai-sdk/mcp`                              | 2.0.80              | 2.0.83              |
+| `dotenv`                                   | 18.0.8              | 18.0.9              |
+| `drizzle-orm`, `drizzle-kit`               | 1.0.0-rc.4          | unchanged           |
+
+Bun's formatter now owns formatting, with the shared style configured under `[fmt]` in
+`bunfig.toml`. `bun run format` writes formatting changes and `bun run format:check` runs
+`bun fmt --check` without writing. `bun fmt --changed` formats files that differ from the
+default branch. Biome remains the linter, with its formatter disabled to avoid competing output.
+Formatting respects the repository's `.gitignore`, skips lockfiles by default, and excludes
+generated Drizzle `snapshot.json` files through `[fmt].ignorePatterns`.
+
+Workspace type checks and checked builds already use Bun's built-in checker and benefit from
+the new release. The root scripts check now uses
+`bun check --no-script --project scripts/tsconfig.json`; `--no-script` bypasses the root's
+combined `check` script. CI also uses the release's configurable HTTP retry backoff, set to
+250 ms initially, to tolerate longer transient registry failures.
+
+Bun 1.4.4 changes skipped-code coverage accounting and Linux optional-package selection by
+libc. Validation must therefore include the existing coverage floors, native UI smoke checks,
+and both CI platforms. The validation results in the historical sections below describe their
+respective baselines, not this refresh.
+
+October 24 validation passed locally on Windows x64 with Bun 1.4.4:
+
+- `bun ci`: frozen lockfile accepted.
+- `bun audit`: no vulnerabilities across 120 audited packages.
+- `bun outdated --recursive`: no outdated direct dependencies reported.
+- `bun run verify`: formatter, Biome lint, workspace and script type checks, migration validation,
+  261 tests, coverage floors, and all production bundles passed.
+- Weighted coverage: 80.68% lines and 68.70% functions, above the unchanged 65% / 55% floors.
+- `bun run test:stress`: 783 passes, zero failures (seed 578552922).
+- `bun run test:cli:smoke` and `bun run test:cli:bundle`: native UI startup and shutdown passed.
+
+CI runs exposed platform issues addressed in this refresh. `.gitattributes`
+now enforces LF for text checkouts, preventing Windows formatting failures. Startup tests launch
+Unix servers in an isolated process group and kill that group during cleanup, so Bun's watch
+supervisor cannot leave the test waiting on open output pipes. Hosted Windows and Linux outcomes
+are reported by the pull request's Verify checks. Rollback fault-injection fixtures also
+canonicalize their temporary directory, matching the production boundary's real paths when a
+Windows runner exposes a shortened path such as `RUNNER~1`.
+
+## October 20 refresh
 
 All workspace dependencies were checked against npm release tags on October 20, 2026.
 Only AI SDK and its MCP adapter have newer stable releases than the October 15 baseline.
 Bun's [official release notes](https://bun.com/blog/bun-v1.4.3) still identify 1.4.3 as the
 current runtime; the installed runtime, minimum, package-manager pin, types, and CI agree.
 
-| Dependency | October 15 baseline | Selected October 20 |
-| --- | --- | --- |
-| `ai` (server and shared) | 7.0.141 | 7.0.146 |
-| `@ai-sdk/mcp` | 2.0.76 | 2.0.80 |
-| `@ai-sdk/provider` (transitive) | 4.0.27 | 4.0.31 |
-| `@ai-sdk/provider-utils` (transitive) | 5.0.60 | 5.0.64 |
-| `@ai-sdk/gateway` (transitive) | 4.0.114 | 4.0.119 |
-| `undici` (transitive) | 7.30.0 | 7.30.1 |
-| `undici-types` (transitive) | 8.9.0 | 8.12.3 |
-| CI `actions/upload-artifact` | 7.0.1 | 7.0.2 |
+| Dependency                            | October 15 baseline | Selected October 20 |
+| ------------------------------------- | ------------------- | ------------------- |
+| `ai` (server and shared)              | 7.0.141             | 7.0.146             |
+| `@ai-sdk/mcp`                         | 2.0.76              | 2.0.80              |
+| `@ai-sdk/provider` (transitive)       | 4.0.27              | 4.0.31              |
+| `@ai-sdk/provider-utils` (transitive) | 5.0.60              | 5.0.64              |
+| `@ai-sdk/gateway` (transitive)        | 4.0.114             | 4.0.119             |
+| `undici` (transitive)                 | 7.30.0              | 7.30.1              |
+| `undici-types` (transitive)           | 8.9.0               | 8.12.3              |
+| CI `actions/upload-artifact`          | 7.0.1               | 7.0.2               |
 
 The [AI SDK changelog](https://github.com/vercel/ai/blob/main/packages/ai/CHANGELOG.md)
 documents improved OpenAI custom-tool input streaming and an experimental low-memory stream
@@ -48,27 +122,26 @@ baseline; the evaluation document records the current verification separately.
 
 ## October 15 baseline upgrade
 
-Versions were checked against npm release tags and official package documentation on October 15,
-2026. The installed runtime was already Bun 1.4.3 (`c6da4a4d3`); the project minimum,
+Versions were checked against npm release tags and official package documentation on October 15, 2026. The installed runtime was already Bun 1.4.3 (`c6da4a4d3`); the project minimum,
 `packageManager`, Bun types, and Windows/Linux CI now agree on 1.4.3.
 
 ## Versions
 
-| Dependency | Before | Selected |
-| --- | --- | --- |
-| Bun project minimum / CI | 1.4.2 | 1.4.3 |
-| `@types/bun` | 1.4.2 | 1.4.3 |
-| `@opentui/core`, `@opentui/react` | 0.5.14 | 0.6.6 |
-| `react` | 19.3.0 | 19.3.1 |
-| `@types/react` | 19.3.0 | 19.3.0 (current latest) |
-| `ai` | 7.0.130 | 7.0.141 |
-| `@ai-sdk/mcp` | 2.0.69 | 2.0.76 |
-| `zod` | 4.6.5 | 4.6.7 |
-| `dotenv` | 18.0.6 | 18.0.8 |
-| `hono`, `@hono/zod-validator` | 4.13.13 / 0.9.1 | unchanged (current latest) |
-| `@biomejs/biome` | 2.5.15 | 2.5.15 (current latest) |
-| `typescript` | 7.0.2 | 7.0.2 (current latest) |
-| `drizzle-orm`, `drizzle-kit` | 1.0.0-rc.4 | unchanged (current `rc` tag) |
+| Dependency                        | Before          | Selected                     |
+| --------------------------------- | --------------- | ---------------------------- |
+| Bun project minimum / CI          | 1.4.2           | 1.4.3                        |
+| `@types/bun`                      | 1.4.2           | 1.4.3                        |
+| `@opentui/core`, `@opentui/react` | 0.5.14          | 0.6.6                        |
+| `react`                           | 19.3.0          | 19.3.1                       |
+| `@types/react`                    | 19.3.0          | 19.3.0 (current latest)      |
+| `ai`                              | 7.0.130         | 7.0.141                      |
+| `@ai-sdk/mcp`                     | 2.0.69          | 2.0.76                       |
+| `zod`                             | 4.6.5           | 4.6.7                        |
+| `dotenv`                          | 18.0.6          | 18.0.8                       |
+| `hono`, `@hono/zod-validator`     | 4.13.13 / 0.9.1 | unchanged (current latest)   |
+| `@biomejs/biome`                  | 2.5.15          | 2.5.15 (current latest)      |
+| `typescript`                      | 7.0.2           | 7.0.2 (current latest)       |
+| `drizzle-orm`, `drizzle-kit`      | 1.0.0-rc.4      | unchanged (current `rc` tag) |
 
 `bun update --recursive --latest` updated all workspace manifests and refreshed transitive
 dependencies. Exact pins and caret-range styles are preserved. Shared AI SDK and Zod versions

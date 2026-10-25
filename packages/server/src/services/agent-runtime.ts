@@ -162,9 +162,7 @@ const MUTATION_TOOLS = new Set([
 const SENSITIVE_READ_TOOLS = new Set(["readFile", "readLines", "fileInfo"]);
 
 export type ToolApprovalDecision =
-	| { type: "approved" }
-	| { type: "user-approval" }
-	| { type: "denied"; reason: string };
+	{ type: "approved" } | { type: "user-approval" } | { type: "denied"; reason: string };
 
 export type ToolApprovalPolicyInput =
 	| { kind: "shell"; approvalMode: ApprovalMode; assessment: CommandAssessment }
@@ -1460,7 +1458,7 @@ export class NightcodeLLMService implements LLMService {
 			}),
 			glob: tool({
 				description:
-					"Find files under an authorized directory with a Bun glob. Results are relative, sorted, bounded, and checked against canonical roots.",
+					"Find files under an authorized directory with a Bun glob, including extglob exclusions such as **/!(*.test).ts and brace ranges such as shard-{1..3}.json. Results are relative, sorted, bounded, and checked against canonical roots.",
 				inputSchema: z.object({
 					pattern: z.string().min(1).max(500),
 					cwd: z.string().default("."),
@@ -1485,11 +1483,14 @@ export class NightcodeLLMService implements LLMService {
 			}),
 			grep: tool({
 				description:
-					"Search bounded UTF-8 source files with deterministic case-insensitive literal matching. Sensitive and generated paths are skipped.",
+					"Search bounded UTF-8 source files with deterministic case-insensitive literal matching. The include glob supports extglobs such as **/!(*.test).ts and brace ranges. Sensitive and generated paths are skipped.",
 				inputSchema: z.object({
 					pattern: z.string().min(1).max(500),
 					cwd: z.string().default("."),
-					include: z.string().max(500).default("**/*.{ts,tsx,js,jsx,json,md,css,html}"),
+					include: z
+						.string()
+						.max(500)
+						.default("**/*.{ts,tsx,mts,cts,js,jsx,mjs,cjs,json,md,css,html}"),
 					limit: z.number().int().positive().max(1_000).default(200),
 				}),
 				execute: async ({ pattern, cwd, include, limit }, { abortSignal }) => {

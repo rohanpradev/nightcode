@@ -1,5 +1,5 @@
 import { describe, expect, it, spyOn } from "bun:test";
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { tool } from "ai";
@@ -74,6 +74,113 @@ function response(toolName?: string, input: unknown = {}, reasoning = false) {
 }
 
 describe("NightcodeLLMService", () => {
+	for (const testCase of [
+		{
+			name: "excludes test files with a glob extglob",
+			toolName: "glob",
+			input: { pattern: "**/!(*.test).ts" },
+			expected: ["src/cart.ts"],
+		},
+		{
+			name: "selects glob brace ranges",
+			toolName: "glob",
+			input: { pattern: "shard-{1..2}.json" },
+			expected: ["shard-1.json", "shard-2.json"],
+		},
+		{
+			name: "excludes test files from grep using an include extglob",
+			toolName: "grep",
+			input: { pattern: "needle", include: "**/!(*.test).ts" },
+			expected: ["src/cart.ts:1:export function needle() {}"],
+		},
+		{
+			name: "restricts grep to an include brace range",
+			toolName: "grep",
+			input: { pattern: "needle", include: "shard-{1..2}.json" },
+			expected: ['shard-1.json:1:"needle"', 'shard-2.json:1:"needle"'],
+		},
+	]) {
+		it(testCase.name, async () => {
+			const workspace = await mkdtemp(join(tmpdir(), "nightcode-agent-patterns-"));
+			await mkdir(join(workspace, "src"));
+			await writeFile(join(workspace, "src", "cart.ts"), "export function needle() {}");
+			await writeFile(join(workspace, "src", "cart.test.ts"), "export function needleTest() {}");
+			for (const index of [1, 2, 3]) {
+				await writeFile(join(workspace, `shard-${index}.json`), '"needle"');
+			}
+			const model = new MockLanguageModelV4({
+				doStream: [response(testCase.toolName, testCase.input), response()],
+			});
+			const service = createLLMService({ workspaceRoot: workspace, model });
+			const events = await Array.fromAsync(
+				service.stream([{ role: "user", content: "find the matching files" }], { agentMode: true }),
+			);
+			const result = events.find((event) => event.type === "tool-result");
+			if (result?.type !== "tool-result") throw new Error(JSON.stringify(events));
+			expect(result.toolResult.isError).toBe(false);
+			expect(result.toolResult.result.split("\n").sort()).toEqual(testCase.expected);
+			expect(events.at(-1)).toMatchObject({ type: "done", finishReason: "stop" });
+		});
+	}
+
+	it("searches modern JavaScript and TypeScript module extensions by default", async () => {
+		const workspace = await mkdtemp(join(tmpdir(), "nightcode-agent-module-search-"));
+		const extensions = ["mts", "cts", "mjs", "cjs"];
+		for (const extension of extensions) {
+			await writeFile(join(workspace, `source.${extension}`), "const needle = true;");
+		}
+		const model = new MockLanguageModelV4({
+			doStream: [response("grep", { pattern: "needle" }), response()],
+		});
+		const service = createLLMService({ workspaceRoot: workspace, model });
+		const events = await Array.fromAsync(
+			service.stream([{ role: "user", content: "search all module formats" }], { agentMode: true }),
+		);
+		const result = events.find((event) => event.type === "tool-result");
+		if (result?.type !== "tool-result") throw new Error(JSON.stringify(events));
+		expect(result.toolResult.isError).toBe(false);
+		expect(result.toolResult.result.split("\n").sort()).toEqual(
+			extensions.map((extension) => `source.${extension}:1:const needle = true;`).sort(),
+		);
+	});
+
+	for (const toolName of ["glob", "grep"]) {
+		it(`keeps ${toolName} extglobs inside the canonical workspace boundary`, async () => {
+			const workspace = await mkdtemp(join(tmpdir(), "nightcode-agent-glob-boundary-"));
+			const outside = await mkdtemp(join(tmpdir(), "nightcode-agent-glob-external-"));
+			await writeFile(join(workspace, "local.ts"), "const needle = true;");
+			await writeFile(join(outside, "outside.ts"), "const needle = 'EXTERNAL_SECRET';");
+			try {
+				await symlink(
+					outside,
+					join(workspace, "linked"),
+					process.platform === "win32" ? "junction" : "dir",
+				);
+			} catch (error) {
+				if (["EACCES", "ENOSYS", "EPERM"].includes((error as NodeJS.ErrnoException).code ?? ""))
+					return;
+				throw error;
+			}
+			const input =
+				toolName === "glob"
+					? { pattern: "**/@(local|outside).ts" }
+					: { pattern: "needle", include: "**/@(local|outside).ts" };
+			const model = new MockLanguageModelV4({
+				doStream: [response(toolName, input), response()],
+			});
+			const service = createLLMService({ workspaceRoot: workspace, model });
+			const events = await Array.fromAsync(
+				service.stream([{ role: "user", content: "find matching source" }], { agentMode: true }),
+			);
+			const result = events.find((event) => event.type === "tool-result");
+			if (result?.type !== "tool-result") throw new Error(JSON.stringify(events));
+			expect(result.toolResult.isError).toBe(false);
+			expect(result.toolResult.result).toBe(
+				toolName === "glob" ? "local.ts" : "local.ts:1:const needle = true;",
+			);
+		});
+	}
+
 	for (const limited of [false, true]) {
 		it(`reports ${limited ? "step-limit after tool calls" : "natural success at the step limit"}`, async () => {
 			const workspace = await mkdtemp(join(tmpdir(), "nightcode-agent-limit-"));

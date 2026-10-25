@@ -18,13 +18,13 @@
 		"typecheck": "bun check --project tsconfig.json"
 	},
 	"dependencies": {
-		"@ai-sdk/mcp": "2.0.80",
+		"@ai-sdk/mcp": "2.0.84",
 		"@hono/zod-validator": "^0.9.1",
 		"@nightcode/database": "workspace:*",
 		"@nightcode/shared": "workspace:*",
-		"ai": "7.0.146",
-		"dotenv": "^18.0.8",
-		"hono": "^4.13.13",
+		"ai": "7.0.153",
+		"dotenv": "^18.0.9",
+		"hono": "^4.13.14",
 		"zod": "^4.6.7"
 	}
 }

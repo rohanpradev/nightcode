@@ -79,7 +79,8 @@ describe("structured patch engine", () => {
 	});
 
 	it("rolls back a partially completed undo if a later restore fails", async () => {
-		const root = await mkdtemp(join(tmpdir(), "nightcode-undo-failure-"));
+		// Match the canonical paths used by authorization, including Windows TEMP aliases.
+		const root = await fs.realpath(await mkdtemp(join(tmpdir(), "nightcode-undo-failure-")));
 		const boundary = new WorkspaceBoundary(root);
 		await writeFile(join(root, "a.txt"), "before-a");
 		await writeFile(join(root, "b.txt"), "before-b");
@@ -104,7 +105,7 @@ describe("structured patch engine", () => {
 	});
 
 	it("reports failed rollback paths while continuing to restore other files", async () => {
-		const root = await mkdtemp(join(tmpdir(), "nightcode-rollback-failure-"));
+		const root = await fs.realpath(await mkdtemp(join(tmpdir(), "nightcode-rollback-failure-")));
 		for (const name of ["a", "b", "c"]) await writeFile(join(root, `${name}.txt`), "before");
 		const originalRename = fs.rename;
 		let bWrites = 0;
@@ -125,6 +126,7 @@ describe("structured patch engine", () => {
 		} finally {
 			renameSpy.mockRestore();
 		}
+		expect(bWrites).toBe(2);
 		expect(await readFile(join(root, "a.txt"), "utf8")).toBe("before");
 		expect(await readFile(join(root, "b.txt"), "utf8")).toBe("after");
 		expect(await readFile(join(root, "c.txt"), "utf8")).toBe("before");

@@ -77,6 +77,65 @@ describe("remote event parser", () => {
 		expect(response.body?.locked).toBe(false);
 	});
 
+	it.each([false, true])(
+		"limits Unicode events by wire bytes (fragmented: %s)",
+		async (fragmented) => {
+			const payload = new TextEncoder().encode(
+				`${JSON.stringify({ type: "text", text: "🌙".repeat(2 * 1024 * 1024) })}\n{"type":"done"}\n`,
+			);
+			let offset = 0;
+			let cancelled = false;
+			const response = new Response(
+				new ReadableStream({
+					pull(controller) {
+						if (offset === payload.length) return controller.close();
+						const end = fragmented ? Math.min(offset + 64 * 1024, payload.length) : payload.length;
+						controller.enqueue(payload.subarray(offset, end));
+						offset = end;
+					},
+					cancel() {
+						cancelled = true;
+					},
+				}),
+			);
+			await expect(Array.fromAsync(parseEventStream(response))).rejects.toThrow("exceeds 8 MiB");
+			expect(cancelled).toBe(true);
+			expect(response.body?.locked).toBe(false);
+		},
+	);
+
+	it("applies the byte limit per event, including an event exactly at the limit", async () => {
+		const maxBytes = 8 * 1024 * 1024;
+		const overhead = JSON.stringify({ type: "text", text: "" }).length;
+		const text = "x".repeat(maxBytes - overhead);
+		const payload = `${JSON.stringify({ type: "text", text })}\n{"type":"text","text":"next"}\n{"type":"done"}\n`;
+		expect(new TextEncoder().encode(payload).byteLength).toBeGreaterThan(maxBytes);
+		const events = await Array.fromAsync(parseEventStream(new Response(payload)));
+		expect(events).toHaveLength(3);
+		expect(events[0]).toEqual({ type: "text", text });
+		expect(events[1]).toEqual({ type: "text", text: "next" });
+		expect(events[2]).toEqual({ type: "done" });
+	});
+
+	it("preserves BOM and CRLF handling when each byte arrives separately", async () => {
+		const payload = new TextEncoder().encode(
+			'\uFEFF\r\n{"type":"text","text":"🌙"}\r\n{"type":"done"}',
+		);
+		let offset = 0;
+		const response = new Response(
+			new ReadableStream({
+				pull(controller) {
+					if (offset < payload.length) controller.enqueue(payload.subarray(offset, ++offset));
+					else controller.close();
+				},
+			}),
+		);
+		expect(await Array.fromAsync(parseEventStream(response))).toEqual([
+			{ type: "text", text: "🌙" },
+			{ type: "done" },
+		]);
+	});
+
 	it("cancels the response body when the caller stops reading", async () => {
 		let cancelled = false;
 		const response = new Response(

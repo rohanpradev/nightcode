@@ -14,6 +14,22 @@ import {
 } from "./context-engine";
 
 describe("repository context", () => {
+	it("includes TypeScript ES modules and CommonJS files in the repository map", async () => {
+		const root = await mkdtemp(join(tmpdir(), "nightcode-index-modules-"));
+		await writeFile(join(root, "modern.mts"), "export function modernModule() { return true; }");
+		await writeFile(
+			join(root, "legacy.cjs"),
+			"function commonJsModule() { return true; }\nmodule.exports = commonJsModule;",
+		);
+
+		expect(await indexDirectory(root)).toBe(2);
+		const map = generateRepomap(1_000, root);
+		expect(map).toContain("## modern.mts");
+		expect(map).toContain("modernModule");
+		expect(map).toContain("## legacy.cjs");
+		expect(map).toContain("commonJsModule");
+	});
+
 	it("keeps indexes isolated by workspace", async () => {
 		const first = await mkdtemp(join(tmpdir(), "nightcode-index-a-"));
 		const second = await mkdtemp(join(tmpdir(), "nightcode-index-b-"));

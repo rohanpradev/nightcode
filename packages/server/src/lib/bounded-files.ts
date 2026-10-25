@@ -1,5 +1,4 @@
 import { createReadStream } from "node:fs";
-import { createInterface } from "node:readline";
 
 export async function readTextPrefix(path: string, maxChars: number): Promise<string> {
 	const file = Bun.file(path);
@@ -18,30 +17,95 @@ export async function readLineRange(
 	abortSignal?: AbortSignal,
 ): Promise<string> {
 	if (abortSignal?.aborted) throw abortSignal.reason ?? new Error("file read aborted");
-	const input = createReadStream(path, { encoding: "utf8" });
-	const abort = () => input.destroy(abortSignal?.reason ?? new Error("file read aborted"));
+	const input = createReadStream(path, { encoding: "utf8", highWaterMark: 64 * 1024 });
+	const abort = () =>
+		input.destroy(
+			abortSignal?.reason instanceof Error ? abortSignal.reason : new Error("file read aborted"),
+		);
 	abortSignal?.addEventListener("abort", abort, { once: true });
-	const lines = createInterface({ input, crlfDelay: Number.POSITIVE_INFINITY });
+	if (abortSignal?.aborted) abort();
 	const output: string[] = [];
-	let lineNumber = 0;
+	let lineNumber = 1;
+	let line = "";
+	let hasContent = false;
+	let skipLineFeed = false;
 	let chars = 0;
 	let truncated = false;
+	let reading = true;
 
-	try {
-		for await (const line of lines) {
-			lineNumber++;
-			if (lineNumber < startLine) continue;
-			if (lineNumber > endLine) break;
+	// Buffer only the requested line's remaining allowance. In particular,
+	// readline would accumulate an entire minified line before enforcing the cap.
+	const append = (part: string): boolean => {
+		hasContent = true;
+		if (lineNumber < startLine) return true;
+		const prefix = `${lineNumber}: `;
+		const available = maxChars - chars - prefix.length - 1;
+		if (line.length + part.length > available) {
+			if (available > 0) {
+				const partial = (line + part.slice(0, available - line.length)).replace(
+					/[\uD800-\uDBFF]$/,
+					"",
+				);
+				if (partial) output.push(prefix + partial);
+			}
+			truncated = true;
+			return false;
+		}
+		line += part;
+		return true;
+	};
+
+	const finishLine = (): boolean => {
+		if (lineNumber >= startLine) {
 			const rendered = `${lineNumber}: ${line}`;
 			if (chars + rendered.length + 1 > maxChars) {
 				truncated = true;
-				break;
+				return false;
 			}
 			output.push(rendered);
 			chars += rendered.length + 1;
 		}
+		line = "";
+		hasContent = false;
+		lineNumber++;
+		return lineNumber <= endLine;
+	};
+
+	try {
+		for await (const chunk of input) {
+			if (abortSignal?.aborted) throw abortSignal.reason ?? new Error("file read aborted");
+			let offset = 0;
+			if (skipLineFeed) {
+				skipLineFeed = false;
+				if (chunk.charCodeAt(0) === 10) offset = 1;
+			}
+			while (offset < chunk.length) {
+				let end = offset;
+				while (end < chunk.length && chunk.charCodeAt(end) !== 10 && chunk.charCodeAt(end) !== 13)
+					end++;
+				if (end > offset && !append(chunk.slice(offset, end))) {
+					reading = false;
+					break;
+				}
+				if (end === chunk.length) break;
+				if (!finishLine()) {
+					reading = false;
+					break;
+				}
+				offset = end + 1;
+				if (chunk.charCodeAt(end) === 13) {
+					if (offset === chunk.length) skipLineFeed = true;
+					else if (chunk.charCodeAt(offset) === 10) offset++;
+				}
+			}
+			if (!reading) break;
+		}
+		if (abortSignal?.aborted) throw abortSignal.reason ?? new Error("file read aborted");
+		if (reading && hasContent) finishLine();
+	} catch (error) {
+		if (abortSignal?.aborted) throw abortSignal.reason ?? error;
+		throw error;
 	} finally {
-		lines.close();
 		input.destroy();
 		abortSignal?.removeEventListener("abort", abort);
 	}

@@ -27,6 +27,29 @@ bun run verify
 
 Use `bun run test:stress` to repeat every test three times in randomized order, and `bun run eval:harness` for the deterministic agent-runtime and tool-policy subset.
 
+## Verified October 25, 2026
+
+The functionality refresh adds regressions for shell timeout/Stop across multiple descendant
+processes while an unrelated process survives, cancellation before environment preparation
+finishes, huge single-line files with early stream destruction, skipped long lines, split UTF-8
+and CRLF, and UTF-8 byte limits on fragmented remote events. Tool-level tests cover Bun's extended
+glob exclusions and brace ranges, external-link boundaries, and modern module extensions.
+
+Local Windows x64 / Bun 1.4.4 verification passed all formatting, lint, type, migration, coverage,
+and build checks with 282 tests. Weighted coverage was 81.91% lines and 69.93% functions, above
+the unchanged 65% / 55% floors. The frozen install passed, the audit reported no vulnerabilities
+across 120 packages, and the registry reported no outdated direct dependencies.
+The randomized suite passed 846 executions with zero failures (seed `2214563117`); source and
+bundled terminal UI smoke checks also passed.
+
+A local parser microbenchmark used one 256 KiB text event split into 64-byte chunks, one warm-up
+and three measured runs for each implementation. Median time was 128.3 ms before the byte-framing
+rewrite and 2.5 ms afterward. This isolates heavily fragmented input; it is not a claim about
+whole-agent latency or normal network traffic. A separate 100-case comparison confirmed line
+ending/range compatibility with the previous reader when output fits the budget.
+
+Hosted Windows/Linux outcomes are reported by the pull request's Verify checks.
+
 ## Verified October 20, 2026
 
 The final local checks ran on Windows x64 with Bun 1.4.3 and the refreshed AI SDK 7.0.146 /

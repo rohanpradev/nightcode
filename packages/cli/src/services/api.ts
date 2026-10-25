@@ -50,13 +50,34 @@ export async function* parseEventStream(response: {
 	}
 
 	const reader = response.body.getReader();
-	const decoder = new TextDecoder("utf-8", { fatal: true });
-	let buffer = "";
+	const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+	const maxLineBytes = 8 * 1024 * 1024;
+	let buffer = new Uint8Array(0);
+	let bufferedBytes = 0;
+	let firstLine = true;
 	let finished = false;
 	let terminal = false;
-	const maxLineChars = 8 * 1024 * 1024;
-	const parseLine = (line: string) => {
-		if (line.length > maxLineChars) throw new Error("Nightcode stream event exceeds 8 MiB");
+	const append = (part: Uint8Array) => {
+		const required = bufferedBytes + part.byteLength;
+		if (required > maxLineBytes) throw new Error("Nightcode stream event exceeds 8 MiB");
+		if (required > buffer.byteLength) {
+			const grown = new Uint8Array(
+				Math.min(maxLineBytes, Math.max(required, buffer.byteLength * 2, 4096)),
+			);
+			grown.set(buffer.subarray(0, bufferedBytes));
+			buffer = grown;
+		}
+		buffer.set(part, bufferedBytes);
+		bufferedBytes = required;
+	};
+	const parseLine = (bytes: Uint8Array) => {
+		if (bytes.byteLength > maxLineBytes) throw new Error("Nightcode stream event exceeds 8 MiB");
+		let line = decoder.decode(bytes);
+		if (firstLine) {
+			firstLine = false;
+			if (line.startsWith("\uFEFF")) line = line.slice(1);
+		}
+		if (!line.trim()) return;
 		const event = llmStreamChunkSchema.parse(JSON.parse(line));
 		terminal = ["done", "error", "aborted"].includes(event.type);
 		return event;
@@ -67,25 +88,37 @@ export async function* parseEventStream(response: {
 			const { done, value } = await reader.read();
 			if (done) {
 				finished = true;
-				buffer += decoder.decode();
 				break;
 			}
 
-			buffer += decoder.decode(value, { stream: true });
-			const lines = buffer.split("\n");
-			buffer = lines.pop() ?? "";
-
-			for (const line of lines) {
-				if (!line.trim()) continue;
-				yield parseLine(line);
+			// Frame bytes before decoding: the limit is on UTF-8 wire size, and a
+			// fragmented event is copied once per chunk instead of repeatedly split.
+			let offset = 0;
+			while (offset < value.byteLength) {
+				const newline = value.indexOf(10, offset);
+				const end = newline < 0 ? value.byteLength : newline;
+				const part = value.subarray(offset, end);
+				if (newline < 0) {
+					append(part);
+					break;
+				}
+				let line = part;
+				if (bufferedBytes > 0) {
+					append(part);
+					line = buffer.subarray(0, bufferedBytes);
+				}
+				const event = parseLine(line);
+				bufferedBytes = 0;
+				offset = newline + 1;
+				if (!event) continue;
+				yield event;
 				if (terminal) return;
 			}
-			if (buffer.length > maxLineChars) throw new Error("Nightcode stream event exceeds 8 MiB");
 		}
 
-		const trailing = buffer.trim();
-		if (trailing) {
-			yield parseLine(trailing);
+		if (bufferedBytes > 0) {
+			const event = parseLine(buffer.subarray(0, bufferedBytes));
+			if (event) yield event;
 		}
 		if (!terminal) throw new Error("Nightcode stream ended before a terminal event");
 	} finally {

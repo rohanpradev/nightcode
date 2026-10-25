@@ -80,7 +80,7 @@ See the [live test results](docs/live-gateway-tests-2026-10-07.md) for costs and
   narrow this envelope but cannot weaken it.
 - PLAN mode exposes inspection tools only, does not connect project MCP servers, and permits only
   the narrow low-risk shell inspection allowlist.
-- Risk-classified shell execution with approval modes, time/output bounds, cancellation, a minimal child environment, and provider-secret stripping.
+- Risk-classified shell execution with approval modes, time/output bounds, process-tree cancellation, a minimal child environment, and provider-secret stripping.
 - Sensitive-file reads require approval (or are denied by non-interactive policy); repository maps
   and literal search skip conventional credential and private-key paths.
 - Session/workspace-pinned HTTP routes, loopback-only default binding, optional bearer
@@ -96,9 +96,12 @@ See the [live test results](docs/live-gateway-tests-2026-10-07.md) for costs and
 - CLI startup validation, truthful pending/succeeded/failed tool traces, detailed approval cards,
   and a save-before-exit lifecycle.
 - Bun 1.4.4's built-in formatter and TypeScript checker, Drizzle ORM/Kit 1.0.0-rc.4,
-  AI SDK 7.0.152 with MCP 2.0.83, OpenTUI 0.6.8, React 19.3.1, Hono 4.13.13, Biome 2.6.2 for linting, and focused regression suites.
-- Demand-driven HTTP streaming with cancellation cleanup, bounded client event parsing, and
+  AI SDK 7.0.153 with MCP 2.0.84, OpenTUI 0.6.8, React 19.3.1, Hono 4.13.14, Biome 2.6.3 for linting, and focused regression suites.
+- Demand-driven HTTP streaming with cancellation cleanup, client events bounded by UTF-8 bytes, and
   failure-preserving run outcomes.
+- Streaming line reads that return a bounded prefix of oversized lines, and repository search/indexing
+  across `.ts`, `.tsx`, `.mts`, `.cts`, `.js`, `.jsx`, `.mjs`, and `.cjs` sources. Glob tools accept Bun's
+  extended patterns such as `**/!(*.test).ts` and `shard-{1..3}.json`.
 
 ## Agent controls
 
@@ -142,7 +145,7 @@ See [configuration](docs/configuration.md), [architecture](docs/architecture.md)
 [security](docs/security.md), [evaluation](docs/evaluation.md), and the
 [source-backed improvement plan](docs/improvement-plan.md). The [dependency review](docs/dependency-review.md)
 records the official documentation, selected versions, compatibility changes, and validation
-results for dependency upgrades, including the October 24, 2026 refresh. The [harness review](docs/harness-review.md) connects
+results for dependency upgrades, including the October 25, 2026 refresh. The [harness review](docs/harness-review.md) connects
 the current engineering research to implemented behavior and remaining evaluation work.
 
 ## API

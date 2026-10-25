@@ -1,6 +1,26 @@
-# Dependency review — October 24, 2026
+# Dependency review — October 25, 2026
 
 ## Current refresh
+
+Registry checks on October 25 found four new patch releases, now selected in the frozen lockfile:
+
+| Dependency               | October 24 | Selected October 25 |
+| ------------------------ | ---------- | ------------------- |
+| `ai` (server and shared) | 7.0.152    | 7.0.153             |
+| `@ai-sdk/mcp`            | 2.0.83     | 2.0.84              |
+| `hono` (CLI and server)  | 4.13.13    | 4.13.14             |
+| `@biomejs/biome`         | 2.6.2      | 2.6.3               |
+
+Bun remains at 1.4.4. Its [extended glob support](https://bun.com/blog/bun-v1.4.4#bun-glob-supports-extglob-and-brace-ranges)
+is now described and tested through the actual glob and grep tools, including excluded test-file
+patterns, brace ranges, and canonical-root protections. Indexing and default grep also discover
+modern `.mts`, `.cts`, `.mjs`, and `.cjs` modules consistently.
+
+The functionality review additionally replaces whole-line buffering in line-range reads, bounds
+NDJSON events by UTF-8 bytes, and adds shell process-tree cleanup on timeout or Stop. See
+[architecture](architecture.md) for behavior and [evaluation](evaluation.md) for validation.
+
+## October 24 refresh
 
 The October 24 refresh adopts [Bun 1.4.4](https://bun.com/blog/bun-v1.4.4) and updates the
 runtime minimum, package-manager pin, Bun types, and Windows/Linux CI together. Direct package

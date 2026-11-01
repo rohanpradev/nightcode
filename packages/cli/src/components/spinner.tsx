@@ -1,4 +1,5 @@
 import { TextAttributes } from "@opentui/core";
+import { useAnimationTick } from "@opentui/react";
 import { useEffect, useState } from "react";
 
 const SPINNER_FRAMES = [
@@ -28,12 +29,9 @@ export function Spinner({ label = "Thinking", color = "#cba6f7", showElapsed = t
 	const [frame, setFrame] = useState(0);
 	const [elapsed, setElapsed] = useState(0);
 
-	useEffect(() => {
-		const id = setInterval(() => {
-			setFrame((f) => (f + 1) % SPINNER_FRAMES.length);
-		}, FRAME_INTERVAL);
-		return () => clearInterval(id);
-	}, []);
+	useAnimationTick(1000 / FRAME_INTERVAL, () => {
+		setFrame((f) => (f + 1) % SPINNER_FRAMES.length);
+	});
 
 	useEffect(() => {
 		if (!showElapsed) return;

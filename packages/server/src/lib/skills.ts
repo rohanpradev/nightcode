@@ -1,4 +1,12 @@
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import {
+	closeSync,
+	existsSync,
+	fstatSync,
+	openSync,
+	readdirSync,
+	readSync,
+	statSync,
+} from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { readContainedProjectFile, resolveContainedProjectDirectory } from "./project-files";
 
@@ -38,11 +46,13 @@ function skillRoots(rootDir = process.cwd()): SkillRoot[] {
 function safeRead(path: string, projectRoot?: string): string | null {
 	try {
 		if (projectRoot) return readContainedProjectFile(projectRoot, path, MAX_SKILL_BYTES);
-		const file = Bun.file(path);
-		if (file.size > MAX_SKILL_BYTES) {
-			return readFileSync(path, "utf8").slice(0, MAX_SKILL_BYTES);
+		const fd = openSync(path, "r");
+		try {
+			const buffer = Buffer.alloc(Math.min(fstatSync(fd).size, MAX_SKILL_BYTES));
+			return buffer.toString("utf8", 0, readSync(fd, buffer, 0, buffer.length, 0));
+		} finally {
+			closeSync(fd);
 		}
-		return readFileSync(path, "utf8");
 	} catch {
 		return null;
 	}
@@ -97,7 +107,13 @@ export function discoverSkills(rootDir = process.cwd()): AgentSkill[] {
 			continue;
 		}
 
-		for (const entry of readdirSync(directory).slice(0, MAX_SKILLS_PER_ROOT)) {
+		let entries: string[];
+		try {
+			entries = readdirSync(directory).slice(0, MAX_SKILLS_PER_ROOT);
+		} catch {
+			continue;
+		}
+		for (const entry of entries) {
 			let skillDir = join(directory, entry);
 			try {
 				if (!statSync(skillDir).isDirectory()) continue;
@@ -113,7 +129,13 @@ export function discoverSkills(rootDir = process.cwd()): AgentSkill[] {
 			const skill = parseSkill(skillDir, root.scope, root.projectRoot);
 			if (!skill) continue;
 
-			const key = skills.has(skill.id) ? `${skill.id}-${skill.scope}` : skill.id;
+			let key = skill.id;
+			if (skills.has(key)) {
+				const base = `${skill.id}-${skill.scope}`;
+				key = base;
+				let suffix = 2;
+				while (skills.has(key)) key = `${base}-${suffix++}`;
+			}
 			skills.set(key, { ...skill, id: key });
 		}
 	}

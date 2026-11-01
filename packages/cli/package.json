@@ -20,9 +20,9 @@
 		"@nightcode/database": "workspace:*",
 		"@nightcode/server": "workspace:*",
 		"@nightcode/shared": "workspace:*",
-		"@opentui/core": "0.6.8",
-		"@opentui/react": "0.6.8",
-		"hono": "^4.13.14",
+		"@opentui/core": "0.8.1",
+		"@opentui/react": "0.8.1",
+		"hono": "^4.13.15",
 		"react": "^19.3.1",
 		"zod": "^4.6.7"
 	}
